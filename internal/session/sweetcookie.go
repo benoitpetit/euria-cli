@@ -2,7 +2,7 @@ package session
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -41,24 +41,48 @@ func (s *SweetcookieCookieSource) Discover(ctx context.Context, requested Discov
 			browsers[index] = Browser(browser)
 		}
 	}
-	options := sweetcookie.Options{
-		URL:      euriaOrigin,
-		Mode:     sweetcookie.ModeMerge,
-		Browsers: make([]sweetcookie.Browser, len(browsers)),
-		Profiles: make(map[sweetcookie.Browser]string, len(requested.Profiles)),
-	}
-	for index, browser := range browsers {
-		options.Browsers[index] = sweetcookie.Browser(browser)
-	}
-	for browser, profile := range requested.Profiles {
-		options.Profiles[sweetcookie.Browser(browser)] = profile
-	}
-
-	loaded, err := getCookies(ctx, options)
-	if err != nil {
-		return DiscoveryResult{}, errors.New("could not read browser cookies for Euria; check browser access and unlock the system keyring")
+	loaded := sweetcookie.Result{}
+	for _, browser := range browsers {
+		if err := ctx.Err(); err != nil {
+			return DiscoveryResult{}, err
+		}
+		profile := requested.Profiles[browser]
+		if profile == "" {
+			profile = defaultProfile(browser)
+		}
+		options := sweetcookie.Options{
+			URL:      euriaOrigin,
+			Mode:     sweetcookie.ModeMerge,
+			Browsers: []sweetcookie.Browser{sweetcookie.Browser(browser)},
+		}
+		if profile != "" {
+			options.Profiles = map[sweetcookie.Browser]string{sweetcookie.Browser(browser): profile}
+		}
+		result, err := getCookies(ctx, options)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return DiscoveryResult{}, ctxErr
+			}
+			loaded.Warnings = append(loaded.Warnings, fmt.Sprintf("could not read %s cookies for Euria; check browser access and unlock the system keyring", browser))
+			continue
+		}
+		loaded.Cookies = append(loaded.Cookies, result.Cookies...)
+		loaded.Warnings = append(loaded.Warnings, result.Warnings...)
 	}
 	return groupCookies(loaded, time.Now()), nil
+}
+
+// Sweetcookie v0.0.2 deduplicates across profiles without source metadata, so
+// automatic discovery uses one stable default profile per browser.
+func defaultProfile(browser Browser) string {
+	switch browser {
+	case "chrome", "chromium", "edge", "brave", "vivaldi", "opera", "arc", "helium", "dia", "comet", "atlas", "whale":
+		return "Default"
+	case "firefox", "zen", "floorp", "waterfox", "librewolf":
+		return "default-release"
+	default:
+		return ""
+	}
 }
 
 func groupCookies(result sweetcookie.Result, now time.Time) DiscoveryResult {
@@ -70,9 +94,14 @@ func groupCookies(result sweetcookie.Result, now time.Time) DiscoveryResult {
 	groups := make(map[sourceKey]int)
 	discovered := DiscoveryResult{}
 	values := make([]string, 0, len(result.Cookies))
+	containerCookies := false
 	for _, cookie := range result.Cookies {
 		if cookie.Value != "" {
 			values = append(values, cookie.Value)
+		}
+		if cookie.Container.ID != 0 {
+			containerCookies = true
+			continue
 		}
 		converted, ok := eligibleCookie(cookie, now)
 		if !ok {
@@ -93,6 +122,9 @@ func groupCookies(result sweetcookie.Result, now time.Time) DiscoveryResult {
 		}
 	}
 	discovered.Warnings = redactWarnings(result.Warnings, values)
+	if containerCookies {
+		discovered.Warnings = append(discovered.Warnings, "Firefox account-container cookies are not supported; sign in in the default container or use another browser")
+	}
 	return discovered
 }
 

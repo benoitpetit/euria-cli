@@ -20,6 +20,7 @@ type workflowCookieSource struct {
 	profiles       []session.Profile
 	cookies        map[string][]*http.Cookie
 	profileErrors  map[string]error
+	warnings       []string
 	err            error
 	discoveryCalls int
 	options        []session.DiscoveryOptions
@@ -31,7 +32,7 @@ func (s *workflowCookieSource) Discover(_ context.Context, options session.Disco
 	if s.err != nil {
 		return session.DiscoveryResult{}, s.err
 	}
-	result := session.DiscoveryResult{}
+	result := session.DiscoveryResult{Warnings: append([]string(nil), s.warnings...)}
 	for _, profile := range s.profiles {
 		if len(options.Browsers) > 0 && !containsBrowser(options.Browsers, profile.Browser) {
 			continue
@@ -200,16 +201,21 @@ func TestAuthLoginCancellation(t *testing.T) {
 
 func TestAuthLoginTimeout(t *testing.T) {
 	launcher := &workflowBrowserLauncher{}
+	profile := session.Profile{Browser: "firefox", Name: "work", Path: "/firefox/work/cookies.sqlite"}
+	source := &workflowCookieSource{profiles: []session.Profile{profile}, warnings: []string{"Firefox database is locked"}}
 	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		CookieSource: &workflowCookieSource{}, BrowserLauncher: launcher,
+	err := Run(context.Background(), []string{"auth", "login", "--browser", "firefox", "--profile", "work"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
+		CookieSource: source, BrowserLauncher: launcher,
 		LoginPollInterval: time.Millisecond, LoginTimeout: 5 * time.Millisecond,
 	})
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("Run() error = %v, want login timeout", err)
+	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "Firefox database is locked") || !strings.Contains(err.Error(), "--browser firefox --profile work") {
+		t.Fatalf("Run() error = %v, want timeout, latest source warning, and selected auth status command", err)
 	}
 	if len(launcher.targets) != 1 || launcher.targets[0] != euriaLoginURL {
 		t.Fatalf("browser targets = %v, want one Euria login URL", launcher.targets)
+	}
+	if !strings.Contains(stderr.String(), "firefox") || !strings.Contains(stderr.String(), "profile work") || !strings.Contains(stderr.String(), "default browser may differ") {
+		t.Fatalf("login guidance = %q, want selected browser/profile and opener mismatch guidance", stderr.String())
 	}
 }
 
@@ -349,8 +355,8 @@ func TestRunAuthLoginReportsBrowserLaunchFailure(t *testing.T) {
 }
 
 func TestRunAuthLoginTimesOutWaitingForSession(t *testing.T) {
-	profile := session.Profile{Browser: "chrome", Name: "Default", Path: "/profiles/chrome/Default"}
-	source := &workflowCookieSource{profiles: []session.Profile{profile}, cookies: map[string][]*http.Cookie{
+	profile := session.Profile{Browser: "firefox", Name: "work", Path: "/profiles/firefox/work"}
+	source := &workflowCookieSource{profiles: []session.Profile{profile}, warnings: []string{"Firefox browser database is locked"}, cookies: map[string][]*http.Cookie{
 		profile.Path: {{Name: "EURIA_SESSION", Value: "stale", Path: "/"}},
 	}}
 	launcher := &workflowBrowserLauncher{}
@@ -364,12 +370,15 @@ func TestRunAuthLoginTimesOutWaitingForSession(t *testing.T) {
 	}))
 	defer server.Close()
 	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
+	err := Run(context.Background(), []string{"auth", "login", "--browser", "firefox", "--profile", "work"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
 		EuriaOrigin: server.URL, CookieSource: source, HTTPClient: server.Client(), BrowserLauncher: launcher,
 		LoginPollInterval: time.Millisecond, LoginTimeout: 15 * time.Millisecond,
 	})
-	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "euria auth status") {
+	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "euria auth status --browser firefox --profile work") || !strings.Contains(err.Error(), "Firefox browser database is locked") {
 		t.Fatalf("Run() error = %v, want actionable timeout", err)
+	}
+	if !strings.Contains(stderr.String(), "profile work") || !strings.Contains(stderr.String(), "default browser may differ") {
+		t.Fatalf("login guidance = %q, want selected source and browser-opener guidance", stderr.String())
 	}
 	if apiCalls < 2 || len(launcher.targets) != 1 {
 		t.Fatalf("auth status calls = %d, launches = %d, want polling after launch", apiCalls, len(launcher.targets))
@@ -550,11 +559,11 @@ func TestRunAuthStatusReportsSignedOut(t *testing.T) {
 	}
 }
 
-func TestRunAuthStatusSuppressesAutomaticBrowserWarnings(t *testing.T) {
+func TestRunAuthStatusSuppressesAutomaticMissingBrowserWarnings(t *testing.T) {
 	profile := session.Profile{Browser: "chrome", Name: "Default", Path: "/chrome/Default/Cookies"}
 	source := &workflowCookieSource{
 		profiles:      []session.Profile{profile},
-		profileErrors: map[string]error{profile.Path: errors.New("browser database is locked")},
+		profileErrors: map[string]error{profile.Path: errors.New("chrome cookie store not found")},
 	}
 	var stdout, stderr bytes.Buffer
 	err := Run(context.Background(), []string{"auth", "status"}, strings.NewReader(""), &stdout, &stderr, Dependencies{CookieSource: source})
@@ -563,6 +572,18 @@ func TestRunAuthStatusSuppressesAutomaticBrowserWarnings(t *testing.T) {
 	}
 	if stdout.String() != "Euria session: not signed in\n"+signInInstruction+"\n" || stderr.Len() != 0 {
 		t.Fatalf("stdout = %q, stderr = %q; want concise signed-out guidance without automatic-source noise", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunAuthStatusReportsAutomaticActionableWarningsWithoutSession(t *testing.T) {
+	source := &workflowCookieSource{warnings: []string{"Firefox browser database is locked; unlock the system keyring"}}
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"auth", "status"}, strings.NewReader(""), &stdout, &stderr, Dependencies{CookieSource: source})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(stderr.String(), "database is locked") || stdout.String() != "Euria session: not signed in\n"+signInInstruction+"\n" {
+		t.Fatalf("stdout = %q, stderr = %q; want actionable automatic-source warning", stdout.String(), stderr.String())
 	}
 }
 

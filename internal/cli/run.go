@@ -88,11 +88,11 @@ func runAuthLogin(ctx context.Context, opts Options, stdout, stderr io.Writer, d
 	if err != nil {
 		return err
 	}
-	if err := reportDiscoveryWarnings(stderr, opts, result.Warnings); err != nil {
-		return err
-	}
 	signedIn, err := signedInSessions(ctx, client, result.Sessions)
 	if err != nil {
+		return err
+	}
+	if err := reportDiscoveryWarnings(stderr, opts, result.Warnings, len(signedIn) > 0); err != nil {
 		return err
 	}
 	if len(signedIn) > 0 {
@@ -106,7 +106,7 @@ func runAuthLogin(ctx context.Context, opts Options, stdout, stderr io.Writer, d
 	if err := launcher.Open(euriaLoginURL); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(stderr, "Finish signing in to Euria in the opened browser. The CLI will detect the session automatically; press Ctrl+C to cancel."); err != nil {
+	if _, err := fmt.Fprintln(stderr, loginInstructions(opts)); err != nil {
 		return err
 	}
 
@@ -129,23 +129,27 @@ func waitForLogin(ctx context.Context, client *euria.Client, opts Options, depen
 	defer cancel()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var lastWarnings []string
 
 	for {
 		if err := loginCtx.Err(); err != nil {
-			return loginWaitError(err, opts)
+			return loginWaitError(err, opts, nil)
 		}
 		result, err := discoverSessions(loginCtx, opts, dependencies)
 		if err != nil {
 			if loginCtx.Err() != nil {
-				return loginWaitError(loginCtx.Err(), opts)
+				return loginWaitError(loginCtx.Err(), opts, nil)
 			}
 			return err
+		}
+		if latest := warningsForReport(opts, result.Warnings, false); len(latest) > 0 {
+			lastWarnings = latest
 		}
 		if len(result.Sessions) != 0 {
 			signedIn, err := signedInSessions(loginCtx, client, result.Sessions)
 			if err != nil {
 				if loginCtx.Err() != nil {
-					return loginWaitError(loginCtx.Err(), opts)
+					return loginWaitError(loginCtx.Err(), opts, lastWarnings)
 				}
 				return err
 			}
@@ -155,25 +159,58 @@ func waitForLogin(ctx context.Context, client *euria.Client, opts Options, depen
 		}
 		select {
 		case <-loginCtx.Done():
-			return loginWaitError(loginCtx.Err(), opts)
+			return loginWaitError(loginCtx.Err(), opts, lastWarnings)
 		case <-ticker.C:
 		}
 	}
 }
 
-func loginWaitError(err error, opts Options) error {
+func loginWaitError(err error, opts Options, warnings []string) error {
 	if errors.Is(err, context.Canceled) {
 		return errors.New("login wait cancelled; the browser remains open")
 	}
-	selection := "the opened browser"
+	selected := "a browser profile Euria Retro checks"
 	if len(opts.Browsers) > 0 {
-		names := make([]string, len(opts.Browsers))
-		for index, browser := range opts.Browsers {
-			names[index] = string(browser)
-		}
-		selection = strings.Join(names, ", ") + " browser sources"
+		selected = strings.Join(browserNames(opts.Browsers), ", ") + " browser source"
 	}
-	return fmt.Errorf("timed out waiting for Euria sign-in in %s; finish signing in in the opened browser, then check with: euria auth status", selection)
+	if opts.Profile != "" {
+		selected += " (profile " + opts.Profile + ")"
+	}
+	message := fmt.Sprintf("timed out waiting for Euria sign-in in %s; finish signing in there, then check with: %s", selected, authStatusCommand(opts))
+	if len(warnings) > 0 {
+		message += "; latest browser diagnostic: " + strings.Join(warnings, "; ")
+	}
+	return errors.New(message)
+}
+
+func loginInstructions(opts Options) string {
+	selected := "a browser profile Euria Retro checks automatically"
+	if len(opts.Browsers) > 0 {
+		selected = strings.Join(browserNames(opts.Browsers), " or ") + " browser source"
+		if opts.Profile != "" {
+			selected += " (profile " + opts.Profile + ")"
+		}
+	}
+	return fmt.Sprintf("The system default browser may differ from the source being checked. Sign in using %s; if needed, open https://euria.infomaniak.com there. Press Ctrl+C to cancel.", selected)
+}
+
+func browserNames(browsers []session.Browser) []string {
+	names := make([]string, len(browsers))
+	for index, browser := range browsers {
+		names[index] = string(browser)
+	}
+	return names
+}
+
+func authStatusCommand(opts Options) string {
+	parts := []string{"euria", "auth", "status"}
+	for _, browser := range opts.Browsers {
+		parts = append(parts, "--browser", string(browser))
+	}
+	if opts.Profile != "" {
+		parts = append(parts, "--profile", opts.Profile)
+	}
+	return strings.Join(parts, " ")
 }
 
 func runAuthStatus(ctx context.Context, opts Options, stdout, stderr io.Writer, dependencies Dependencies) error {
@@ -181,10 +218,10 @@ func runAuthStatus(ctx context.Context, opts Options, stdout, stderr io.Writer, 
 	if err != nil {
 		return err
 	}
-	if err := reportDiscoveryWarnings(stderr, opts, result.Warnings); err != nil {
-		return err
-	}
 	if len(result.Sessions) == 0 {
+		if err := reportDiscoveryWarnings(stderr, opts, result.Warnings, false); err != nil {
+			return err
+		}
 		return writeSessionStatus(stdout, false)
 	}
 	client, err := newEuriaClient(dependencies)
@@ -193,6 +230,9 @@ func runAuthStatus(ctx context.Context, opts Options, stdout, stderr io.Writer, 
 	}
 	sessions, err := signedInSessions(ctx, client, result.Sessions)
 	if err != nil {
+		return err
+	}
+	if err := reportDiscoveryWarnings(stderr, opts, result.Warnings, len(sessions) > 0); err != nil {
 		return err
 	}
 	return writeSessionStatus(stdout, len(sessions) > 0)
@@ -215,15 +255,21 @@ func runChat(ctx context.Context, opts Options, stdin io.Reader, stdout, stderr 
 	if err != nil {
 		return err
 	}
-	if err := reportDiscoveryWarnings(stderr, opts, discovery.Warnings); err != nil {
-		return err
-	}
 	if len(discovery.Sessions) == 0 {
+		if err := reportDiscoveryWarnings(stderr, opts, discovery.Warnings, false); err != nil {
+			return err
+		}
 		return noSignedInSessionError()
 	}
 	sessions, err := signedInSessions(ctx, client, discovery.Sessions)
 	if err != nil {
 		return err
+	}
+	if err := reportDiscoveryWarnings(stderr, opts, discovery.Warnings, len(sessions) > 0); err != nil {
+		return err
+	}
+	if len(sessions) == 0 {
+		return noSignedInSessionError()
 	}
 	userSession, err := selectSession(sessions)
 	if err != nil {
@@ -319,8 +365,9 @@ func discoverSessions(ctx context.Context, opts Options, dependencies Dependenci
 	return source.Discover(ctx, options)
 }
 
-func reportDiscoveryWarnings(writer io.Writer, opts Options, warnings []string) error {
-	if len(opts.Browsers) == 0 || writer == nil {
+func reportDiscoveryWarnings(writer io.Writer, opts Options, warnings []string, usableSession bool) error {
+	warnings = warningsForReport(opts, warnings, usableSession)
+	if len(warnings) == 0 || writer == nil {
 		return nil
 	}
 	for _, warning := range warnings {
@@ -332,6 +379,24 @@ func reportDiscoveryWarnings(writer io.Writer, opts Options, warnings []string) 
 		}
 	}
 	return nil
+}
+
+func warningsForReport(opts Options, warnings []string, usableSession bool) []string {
+	if len(opts.Browsers) > 0 {
+		return warnings
+	}
+	if usableSession {
+		return nil
+	}
+	var actionable []string
+	for _, warning := range warnings {
+		lower := strings.ToLower(warning)
+		if strings.Contains(lower, "store not found") || strings.Contains(lower, "profile not found") {
+			continue
+		}
+		actionable = append(actionable, warning)
+	}
+	return actionable
 }
 
 func selectSession(sessions []session.Session) (session.Session, error) {

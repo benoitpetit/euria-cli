@@ -2,33 +2,163 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steipete/sweetcookie"
+	_ "modernc.org/sqlite"
 )
 
 func TestSweetcookieSourceUsesFixedEuriaURL(t *testing.T) {
-	var gotOptions sweetcookie.Options
+	var calls int
 	source := &SweetcookieCookieSource{getCookies: func(_ context.Context, options sweetcookie.Options) (sweetcookie.Result, error) {
-		gotOptions = options
+		calls++
+		if options.URL != "https://euria.infomaniak.com/" {
+			t.Errorf("Sweetcookie URL = %q, want fixed Euria origin", options.URL)
+		}
+		if options.Mode != sweetcookie.ModeMerge {
+			t.Errorf("Sweetcookie mode = %q, want merge", options.Mode)
+		}
+		if len(options.Browsers) != 1 {
+			t.Errorf("Sweetcookie browsers = %v, want one browser per call", options.Browsers)
+		}
+		if len(options.Browsers) == 1 {
+			browser := Browser(options.Browsers[0])
+			if want := defaultProfile(browser); want != "" && options.Profiles[options.Browsers[0]] != want {
+				t.Errorf("profile for %s = %q, want default %q", browser, options.Profiles[options.Browsers[0]], want)
+			}
+		}
 		return sweetcookie.Result{}, nil
 	}}
 
 	if _, err := source.Discover(context.Background(), DiscoveryOptions{}); err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
-	if gotOptions.URL != "https://euria.infomaniak.com/" {
-		t.Errorf("Sweetcookie URL = %q, want fixed Euria origin", gotOptions.URL)
+	if want := len(sweetcookie.DefaultBrowsers()); calls != want {
+		t.Errorf("Sweetcookie calls = %d, want one call for each of %d default browsers", calls, want)
 	}
-	if gotOptions.Mode != sweetcookie.ModeMerge {
-		t.Errorf("Sweetcookie mode = %q, want merge", gotOptions.Mode)
+}
+
+func TestSweetcookieSourceKeepsDuplicateCookiesFromDifferentBrowsers(t *testing.T) {
+	firefoxDB := writeFirefoxCookieDB(t, "firefox", "firefox-session", "")
+	zenDB := writeFirefoxCookieDB(t, "zen", "zen-session", "")
+	source := NewSweetcookieCookieSource()
+	result, err := source.Discover(context.Background(), DiscoveryOptions{
+		Browsers: []Browser{"firefox", "zen"},
+		Profiles: map[Browser]string{"firefox": firefoxDB, "zen": zenDB},
+	})
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
 	}
-	if len(gotOptions.Browsers) == 0 {
-		t.Fatal("Sweetcookie browsers are empty; defaults should be selected explicitly")
+	if len(result.Sessions) != 2 {
+		t.Fatalf("Discover() sessions = %d, want both browser sessions; warnings=%v", len(result.Sessions), result.Warnings)
 	}
+	got := map[Browser]string{}
+	for _, userSession := range result.Sessions {
+		got[userSession.Profile.Browser] = userSession.Cookies[0].Value
+	}
+	if got["firefox"] != "firefox-session" || got["zen"] != "zen-session" {
+		t.Fatalf("sessions = %v, want Firefox and Zen cookies preserved separately", got)
+	}
+}
+
+func TestSweetcookieSourceSelectsFirefoxDefaultProfile(t *testing.T) {
+	home := t.TempDir()
+	var root string
+	switch runtime.GOOS {
+	case "darwin":
+		t.Setenv("HOME", home)
+		root = filepath.Join(home, "Library", "Application Support", "Firefox")
+	case "linux":
+		t.Setenv("HOME", home)
+		root = filepath.Join(home, ".mozilla", "firefox")
+	case "windows":
+		appData := filepath.Join(home, "AppData", "Roaming")
+		t.Setenv("APPDATA", appData)
+		root = filepath.Join(appData, "Mozilla", "Firefox")
+	default:
+		t.Skip("unsupported OS for Firefox profile discovery")
+	}
+	defaultDir := filepath.Join(root, "Profiles", "default-release")
+	workDir := filepath.Join(root, "Profiles", "work")
+	if err := os.MkdirAll(defaultDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles.ini"), []byte(
+		"[Profile0]\nName=default-release\nIsRelative=1\nPath=Profiles/default-release\nDefault=1\n\n"+
+			"[Profile1]\nName=work\nIsRelative=1\nPath=Profiles/work\n",
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFirefoxCookieDBAt(t, defaultDir, "default-session", "")
+	writeFirefoxCookieDBAt(t, workDir, "work-session", "")
+
+	result, err := NewSweetcookieCookieSource().Discover(context.Background(), DiscoveryOptions{Browsers: []Browser{"firefox"}})
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	if len(result.Sessions) != 1 || result.Sessions[0].Profile.Name != "default-release" || result.Sessions[0].Cookies[0].Value != "default-session" {
+		t.Fatalf("Discover() sessions = %#v, want only default-release profile", result.Sessions)
+	}
+}
+
+func TestSweetcookieSourceExcludesFirefoxContainerCookies(t *testing.T) {
+	result := groupCookies(sweetcookie.Result{Cookies: []sweetcookie.Cookie{
+		{Name: "EURIA_SESSION", Value: "default-session", Domain: "euria.infomaniak.com", Path: "/"},
+		{
+			Name: "EURIA_SESSION", Value: "container-session", Domain: "euria.infomaniak.com", Path: "/",
+			Container: sweetcookie.Container{ID: 2, Name: "Work"},
+			Source:    sweetcookie.Source{Browser: sweetcookie.BrowserFirefox, Profile: "default-release", StorePath: "/firefox/cookies.sqlite"},
+		},
+	}}, time.Now())
+	if len(result.Sessions) != 1 || len(result.Sessions[0].Cookies) != 1 || result.Sessions[0].Cookies[0].Value != "default-session" {
+		t.Fatalf("container cookies were not excluded: %#v", result.Sessions)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "container") || strings.Contains(result.Warnings[0], "container-session") {
+		t.Fatalf("container warning = %v, want safe actionable diagnostic", result.Warnings)
+	}
+}
+
+func writeFirefoxCookieDB(t *testing.T, profile, value, originAttributes string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), profile)
+	return writeFirefoxCookieDBAt(t, dir, value, originAttributes)
+}
+
+func writeFirefoxCookieDBAt(t *testing.T, dir, value, originAttributes string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "cookies.sqlite")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE moz_cookies(host TEXT, name TEXT, value TEXT, path TEXT, expiry INTEGER, isSecure INTEGER, isHttpOnly INTEGER, sameSite INTEGER, originAttributes TEXT)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO moz_cookies(host,name,value,path,expiry,isSecure,isHttpOnly,sameSite,originAttributes) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"euria.infomaniak.com", "EURIA_SESSION", value, "/", time.Now().Add(time.Hour).Unix(), 1, 1, 2, originAttributes,
+	); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dbPath
 }
 
 func TestSweetcookieSourceGroupsCookiesByBrowserAndProfile(t *testing.T) {
@@ -38,17 +168,24 @@ func TestSweetcookieSourceGroupsCookiesByBrowserAndProfile(t *testing.T) {
 			Source: sweetcookie.Source{Browser: browser, Profile: profile, StorePath: storePath},
 		}
 	}
-	source := &SweetcookieCookieSource{getCookies: func(context.Context, sweetcookie.Options) (sweetcookie.Result, error) {
-		return sweetcookie.Result{Cookies: []sweetcookie.Cookie{
-			profileCookie("session", "chrome-a", "Default", "/chrome/Default/Cookies", sweetcookie.BrowserChrome),
-			profileCookie("csrf", "csrf-a", "Default", "/chrome/Default/Cookies", sweetcookie.BrowserChrome),
-			profileCookie("session", "chrome-b", "Profile 2", "/chrome/Profile 2/Cookies", sweetcookie.BrowserChrome),
-			profileCookie("session", "edge-a", "Default", "/edge/Default/Cookies", sweetcookie.BrowserEdge),
-			profileCookie("session", "chrome-other-store", "Default", "/chrome/Default/OtherCookies", sweetcookie.BrowserChrome),
-		}}, nil
+	allCookies := []sweetcookie.Cookie{
+		profileCookie("session", "chrome-a", "Default", "/chrome/Default/Cookies", sweetcookie.BrowserChrome),
+		profileCookie("csrf", "csrf-a", "Default", "/chrome/Default/Cookies", sweetcookie.BrowserChrome),
+		profileCookie("session", "chrome-b", "Profile 2", "/chrome/Profile 2/Cookies", sweetcookie.BrowserChrome),
+		profileCookie("session", "edge-a", "Default", "/edge/Default/Cookies", sweetcookie.BrowserEdge),
+		profileCookie("session", "chrome-other-store", "Default", "/chrome/Default/OtherCookies", sweetcookie.BrowserChrome),
+	}
+	source := &SweetcookieCookieSource{getCookies: func(_ context.Context, options sweetcookie.Options) (sweetcookie.Result, error) {
+		var cookies []sweetcookie.Cookie
+		for _, cookie := range allCookies {
+			if cookie.Source.Browser == options.Browsers[0] {
+				cookies = append(cookies, cookie)
+			}
+		}
+		return sweetcookie.Result{Cookies: cookies}, nil
 	}}
 
-	result, err := source.Discover(context.Background(), DiscoveryOptions{})
+	result, err := source.Discover(context.Background(), DiscoveryOptions{Browsers: []Browser{"chrome", "edge"}})
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
@@ -95,7 +232,7 @@ func TestSweetcookieSourceFiltersForeignExpiredAndPathScopedCookies(t *testing.T
 		}}, nil
 	}}
 
-	result, err := source.Discover(context.Background(), DiscoveryOptions{})
+	result, err := source.Discover(context.Background(), DiscoveryOptions{Browsers: []Browser{"chrome"}})
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
@@ -121,7 +258,7 @@ func TestSweetcookieSourcePreservesXSRFAndCookieAttributes(t *testing.T) {
 		}}}, nil
 	}}
 
-	result, err := source.Discover(context.Background(), DiscoveryOptions{})
+	result, err := source.Discover(context.Background(), DiscoveryOptions{Browsers: []Browser{"firefox"}})
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
@@ -147,7 +284,7 @@ func TestSweetcookieSourceWarningsDoNotExposeCookieValues(t *testing.T) {
 		}, nil
 	}}
 
-	result, err := source.Discover(context.Background(), DiscoveryOptions{})
+	result, err := source.Discover(context.Background(), DiscoveryOptions{Browsers: []Browser{"chrome"}})
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}

@@ -2,11 +2,12 @@ module github.com/benoitpetit/euria_retro
 
 go 1.25.0
 
+require modernc.org/sqlite v1.53.0
+
 require (
 	github.com/zalando/go-keyring v0.2.8 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
-	modernc.org/sqlite v1.53.0 // indirect
 )
 
 require (

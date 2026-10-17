@@ -24,7 +24,7 @@ Euria Retro runs on Linux, Windows, and macOS. Prebuilt releases are provided fo
 
 Cookie support is provided by [Sweetcookie](https://github.com/steipete/sweetcookie). Some browser versions or profile layouts may not be readable. On Windows, recent Chromium builds can use app-bound encryption that prevents cookie decryption. A system keychain or keyring prompt may appear when the browser protects cookies with OS credentials.
 
-`auth login` opens the system's default browser. Linux uses `xdg-open`; macOS uses `open`; Windows uses the system URL handler. Finish the Euria sign-in in the opened browser. The selected `--browser` controls which cookie sources are checked, and does not force the OS to open that same browser.
+`auth login` opens the system's default browser. Linux uses `xdg-open`; macOS uses `open`; Windows uses the system URL handler. The system browser may differ from the selected cookie source. When you pass `--browser` or `--profile`, finish signing in in that browser and profile; if the URL opened elsewhere, open `https://euria.infomaniak.com` in the selected browser.
 
 ## Install
 
@@ -77,7 +77,7 @@ The release workflow runs Go tests and `go vet` on native Linux, Windows, and ma
 
 Run `euria auth login` to check for an existing Euria session or open the Infomaniak sign-in page in your default browser. The CLI never asks for or enters your password. It waits until the selected browser sources contain a session accepted by Euria. Press `Ctrl+C` to stop waiting without closing the browser.
 
-By default, Euria Retro checks the browser profiles Sweetcookie discovers automatically. Use repeated `--browser` flags to restrict the search. Use `--profile` with exactly one browser to select a profile by name or path; `--chrome-profile` remains an alias for compatibility.
+By default, Euria Retro checks one default profile per browser: `Default` for Chromium-family browsers, `default-release` for Firefox-family browsers, and the system cookie store for Safari. Use repeated `--browser` flags to select sources. Use `--profile` with exactly one browser to select another profile by name or path; `--chrome-profile` remains an alias for compatibility.
 
 ```sh
 euria auth login
@@ -94,7 +94,7 @@ Run `euria auth status` to check whether Euria accepts the discovered session. I
 euria --guest --chat "Hello!"
 ```
 
-Sweetcookie reads Chromium and Firefox cookie databases through temporary snapshots, including their write-ahead log sidecars. Cookie values stay in process memory; Euria Retro does not persist session data. If the same profile name exists in multiple browsers, select the browser first and then pass its profile name or path.
+Sweetcookie reads Chromium and Firefox cookie databases through temporary snapshots, including their write-ahead log sidecars. Cookie values stay in process memory; Euria Retro does not persist session data. Firefox account-container cookies are not used because the CLI cannot safely combine or select container sessions. If the same profile name exists in multiple browsers, select the browser first and then pass its profile name or path.
 
 ## Quick start
 
@@ -189,8 +189,8 @@ euria --guest --chat "How does chlorophyll help?" --history history.json
 | `--history` | `FILE` | — | Load prior messages in guest mode only. |
 | `--output` | `text`, `json` | `text` | Print the answer or a JSON object. |
 | `--browser` | Sweetcookie browser name; repeatable | automatic | Select browser sources to check. Supported names: `chrome`, `chromium`, `edge`, `brave`, `vivaldi`, `opera`, `arc`, `helium`, `dia`, `comet`, `atlas`, `whale`, `firefox`, `zen`, `floorp`, `waterfox`, `librewolf`, `safari`. |
-| `--profile` | `NAME` or path | automatic | Select a profile for exactly one selected browser. |
-| `--chrome-profile` | `NAME` or path | automatic | Compatibility alias for `--profile`. |
+| `--profile` | `NAME` or path | browser default | Select a profile for exactly one selected browser. |
+| `--chrome-profile` | `NAME` or path | browser default | Compatibility alias for `--profile`. |
 | `--account` | `ID` | automatic | Select an account when the session has several. |
 | `--conversation` | `ID` | new conversation | Continue a saved authenticated conversation. |
 | `--list-models` | — | — | Print model names currently supported by this CLI. |

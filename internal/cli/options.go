@@ -241,9 +241,11 @@ Examples:
 
 Notes:
   --history is available only with --guest. Authenticated conversations are
-  saved to your Euria account. Without --browser, supported default browser
-  sources are checked. Use --browser more than once to select several sources.
+  saved to your Euria account. Without --browser, default browser profiles
+  are checked. Use --browser more than once to select several sources.
   An explicit --profile or --chrome-profile requires exactly one --browser.
+  auth login opens the system browser, which may differ from the selected
+  source. Sign in in the selected source or open the Euria URL there.
   Supported names: chrome, chromium, edge, brave, vivaldi, opera, arc, helium,
   dia, comet, atlas, whale, firefox, zen, floorp, waterfox, librewolf, safari.
 `
