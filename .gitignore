@@ -1,0 +1,20 @@
+# Local secrets and environment settings
+.env
+.env.*
+!.env.example
+
+# Temporary and generated files
+*.tmp
+*.log
+/build/
+/bin/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+
+# Private planning and agent workflow notes
+/docs/superpowers/
