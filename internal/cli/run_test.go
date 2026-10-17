@@ -219,6 +219,20 @@ func TestAuthLoginTimeout(t *testing.T) {
 	}
 }
 
+func TestAuthLoginTimeoutKeepsInitialBrowserWarning(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	launcher := &workflowBrowserLauncher{onOpen: func() { <-ctx.Done() }}
+	source := &workflowCookieSource{warnings: []string{"Firefox database is locked"}}
+	var stdout, stderr bytes.Buffer
+	err := Run(ctx, []string{"auth", "login", "--browser", "firefox"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
+		CookieSource: source, BrowserLauncher: launcher, LoginPollInterval: time.Millisecond, LoginTimeout: time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "Firefox database is locked") {
+		t.Fatalf("Run() error = %v, want timeout with initial browser warning", err)
+	}
+}
+
 func TestRunDefaultsToAuthenticatedMode(t *testing.T) {
 	source := workflowSessionSource()
 	guestCalls := 0

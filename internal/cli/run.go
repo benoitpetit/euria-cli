@@ -118,27 +118,27 @@ func runAuthLogin(ctx context.Context, opts Options, stdout, stderr io.Writer, d
 	if timeout <= 0 {
 		timeout = defaultLoginTimeout
 	}
-	if err := waitForLogin(ctx, client, opts, dependencies, interval, timeout); err != nil {
+	if err := waitForLogin(ctx, client, opts, dependencies, result.Warnings, interval, timeout); err != nil {
 		return err
 	}
 	return writeSessionStatus(stdout, true)
 }
 
-func waitForLogin(ctx context.Context, client *euria.Client, opts Options, dependencies Dependencies, interval, timeout time.Duration) error {
+func waitForLogin(ctx context.Context, client *euria.Client, opts Options, dependencies Dependencies, initialWarnings []string, interval, timeout time.Duration) error {
 	loginCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	var lastWarnings []string
+	lastWarnings := warningsForReport(opts, initialWarnings, false)
 
 	for {
 		if err := loginCtx.Err(); err != nil {
-			return loginWaitError(err, opts, nil)
+			return loginWaitError(err, opts, lastWarnings)
 		}
 		result, err := discoverSessions(loginCtx, opts, dependencies)
 		if err != nil {
 			if loginCtx.Err() != nil {
-				return loginWaitError(loginCtx.Err(), opts, nil)
+				return loginWaitError(loginCtx.Err(), opts, lastWarnings)
 			}
 			return err
 		}
