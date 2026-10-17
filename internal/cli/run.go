@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -17,14 +16,14 @@ import (
 )
 
 const defaultEuriaOrigin = "https://euria.infomaniak.com"
-const euriaLoginURL = "https://euria.infomaniak.com/api/1/login"
+const euriaLoginURL = session.EuriaLoginURL
 
 const (
 	defaultLoginPollInterval = 2 * time.Second
 	defaultLoginTimeout      = 5 * time.Minute
 )
 
-const signInInstruction = "Sign in at https://euria.infomaniak.com in Chrome or Chromium."
+const signInInstruction = "Sign in at https://euria.infomaniak.com in your browser."
 
 // Dependencies supplies the Euria origin and replaceable HTTP/browser sources.
 type Dependencies struct {
@@ -62,7 +61,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			_, err := io.WriteString(stdout, Usage())
 			return err
 		}
-		return runChat(ctx, opts, nil, stdout, dependencies)
+		return runChat(ctx, opts, nil, stdout, stderr, dependencies)
 	}
 	switch opts.Command {
 	case "help":
@@ -72,84 +71,42 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		_, err := io.WriteString(stdout, "fast\nexpert\napertus\n")
 		return err
 	case "auth-status":
-		return runAuthStatus(ctx, opts, stdout, dependencies)
+		return runAuthStatus(ctx, opts, stdout, stderr, dependencies)
 	case "auth-login":
 		return runAuthLogin(ctx, opts, stdout, stderr, dependencies)
 	default:
-		return runChat(ctx, opts, stdin, stdout, dependencies)
+		return runChat(ctx, opts, stdin, stdout, stderr, dependencies)
 	}
 }
 
 func runAuthLogin(ctx context.Context, opts Options, stdout, stderr io.Writer, dependencies Dependencies) error {
-	source := dependencies.CookieSource
-	if source == nil {
-		source = session.NewChromiumCookieSource()
-	}
-	source = selectBrowserSource(source, opts.Browser)
 	client, err := newEuriaClient(dependencies)
 	if err != nil {
 		return err
 	}
-
-	if opts.ChromeProfile == "" {
-		sessions, discoverErr := session.Discover(ctx, source, "")
-		if discoverErr != nil && !errors.Is(discoverErr, session.ErrNoSession) {
-			return discoverErr
-		}
-		if discoverErr == nil {
-			sessions, err = signedInSessions(ctx, client, sessions)
-			if err != nil {
-				return err
-			}
-			if len(sessions) > 1 {
-				return requireProfileSelection("", sessionProfiles(sessions))
-			}
-			if len(sessions) == 1 {
-				return writeSessionStatus(stdout, true)
-			}
-		}
-	}
-
-	profiles, err := source.Profiles(ctx, opts.ChromeProfile)
+	result, err := discoverSessions(ctx, opts, dependencies)
 	if err != nil {
 		return err
 	}
-	if len(profiles) == 0 {
-		if opts.ChromeProfile != "" {
-			return fmt.Errorf("Chrome/Chromium profile %q was not found; pass a profile name or path", opts.ChromeProfile)
-		}
-		return errors.New("no Chrome/Chromium profile found; install or start Chrome or Chromium and retry")
+	if err := reportDiscoveryWarnings(stderr, opts, result.Warnings); err != nil {
+		return err
 	}
-	if len(profiles) > 1 {
-		return requireProfileSelection(opts.ChromeProfile, profiles)
+	signedIn, err := signedInSessions(ctx, client, result.Sessions)
+	if err != nil {
+		return err
 	}
-	profile := profiles[0]
-
-	sessions, discoverErr := session.Discover(ctx, source, profile.Path)
-	if discoverErr != nil && !errors.Is(discoverErr, session.ErrNoSession) {
-		return discoverErr
-	}
-	if discoverErr == nil {
-		sessions, err = signedInSessions(ctx, client, sessions)
-		if err != nil {
-			return err
-		}
-		if len(sessions) > 1 {
-			return requireProfileSelection(opts.ChromeProfile, sessionProfiles(sessions))
-		}
-		if len(sessions) == 1 {
-			return writeSessionStatus(stdout, true)
-		}
+	if len(signedIn) > 0 {
+		return writeSessionStatus(stdout, true)
 	}
 
 	launcher := dependencies.BrowserLauncher
 	if launcher == nil {
-		launcher = session.NewChromiumBrowserLauncher()
+		launcher = session.NewSystemBrowserLauncher()
 	}
-	if err := launcher.Launch(profile, euriaLoginURL); err != nil {
+	if err := launcher.Open(euriaLoginURL); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(stderr, "Complete the Infomaniak sign-in in the browser. Euria will detect the session automatically; press Ctrl+C to cancel."); err != nil {
+	if _, err := fmt.Fprintln(stderr, "Finish signing in to Euria in the opened browser. The CLI will detect the session automatically; press Ctrl+C to cancel."); err != nil {
 		return err
 	}
 
@@ -161,53 +118,13 @@ func runAuthLogin(ctx context.Context, opts Options, stdout, stderr io.Writer, d
 	if timeout <= 0 {
 		timeout = defaultLoginTimeout
 	}
-	if err := waitForLogin(ctx, client, source, profile, interval, timeout); err != nil {
+	if err := waitForLogin(ctx, client, opts, dependencies, interval, timeout); err != nil {
 		return err
 	}
 	return writeSessionStatus(stdout, true)
 }
 
-func sessionProfiles(sessions []session.Session) []session.Profile {
-	profiles := make([]session.Profile, 0, len(sessions))
-	for _, userSession := range sessions {
-		profiles = append(profiles, userSession.Profile)
-	}
-	return profiles
-}
-
-func requireProfileSelection(selector string, profiles []session.Profile) error {
-	if path, ok := samePathBrowserAmbiguity(profiles); ok {
-		return fmt.Errorf("profile path %q could be Chrome or Chromium; specify --browser chrome or --browser chromium with --chrome-profile", path)
-	}
-	message := "multiple Chrome/Chromium profiles are available; choose one with --chrome-profile NAME|PATH:"
-	if selector != "" {
-		message = fmt.Sprintf("profile %q matches multiple Chrome/Chromium profiles; choose a full path with --chrome-profile:", selector)
-	}
-	for _, profile := range profiles {
-		message += fmt.Sprintf("\n  %s: %s", profile.Name, profile.Path)
-	}
-	return errors.New(message)
-}
-
-func samePathBrowserAmbiguity(profiles []session.Profile) (string, bool) {
-	if len(profiles) < 2 {
-		return "", false
-	}
-	path := profiles[0].Path
-	browser := profiles[0].Browser
-	otherBrowser := false
-	for _, profile := range profiles[1:] {
-		if profile.Path != path {
-			return "", false
-		}
-		if profile.Browser != browser {
-			otherBrowser = true
-		}
-	}
-	return path, otherBrowser
-}
-
-func waitForLogin(ctx context.Context, client *euria.Client, source session.CookieSource, profile session.Profile, interval, timeout time.Duration) error {
+func waitForLogin(ctx context.Context, client *euria.Client, opts Options, dependencies Dependencies, interval, timeout time.Duration) error {
 	loginCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(interval)
@@ -215,20 +132,20 @@ func waitForLogin(ctx context.Context, client *euria.Client, source session.Cook
 
 	for {
 		if err := loginCtx.Err(); err != nil {
-			return loginWaitError(err, profile)
+			return loginWaitError(err, opts)
 		}
-		sessions, err := session.Discover(loginCtx, source, profile.Path)
-		if err != nil && !errors.Is(err, session.ErrNoSession) {
+		result, err := discoverSessions(loginCtx, opts, dependencies)
+		if err != nil {
 			if loginCtx.Err() != nil {
-				return loginWaitError(loginCtx.Err(), profile)
+				return loginWaitError(loginCtx.Err(), opts)
 			}
 			return err
 		}
-		if err == nil {
-			signedIn, err := signedInSessions(loginCtx, client, sessions)
+		if len(result.Sessions) != 0 {
+			signedIn, err := signedInSessions(loginCtx, client, result.Sessions)
 			if err != nil {
 				if loginCtx.Err() != nil {
-					return loginWaitError(loginCtx.Err(), profile)
+					return loginWaitError(loginCtx.Err(), opts)
 				}
 				return err
 			}
@@ -238,42 +155,50 @@ func waitForLogin(ctx context.Context, client *euria.Client, source session.Cook
 		}
 		select {
 		case <-loginCtx.Done():
-			return loginWaitError(loginCtx.Err(), profile)
+			return loginWaitError(loginCtx.Err(), opts)
 		case <-ticker.C:
 		}
 	}
 }
 
-func loginWaitError(err error, profile session.Profile) error {
+func loginWaitError(err error, opts Options) error {
 	if errors.Is(err, context.Canceled) {
 		return errors.New("login wait cancelled; the browser remains open")
 	}
-	return fmt.Errorf("timed out waiting for Euria sign-in; check the selected profile with: euria auth status --chrome-profile %q --browser %s", profile.Path, profile.Browser)
+	selection := "the opened browser"
+	if len(opts.Browsers) > 0 {
+		names := make([]string, len(opts.Browsers))
+		for index, browser := range opts.Browsers {
+			names[index] = string(browser)
+		}
+		selection = strings.Join(names, ", ") + " browser sources"
+	}
+	return fmt.Errorf("timed out waiting for Euria sign-in in %s; finish signing in in the opened browser, then check with: euria auth status", selection)
 }
 
-func runAuthStatus(ctx context.Context, opts Options, stdout io.Writer, dependencies Dependencies) error {
-	sessions, err := discoverSessions(ctx, opts.ChromeProfile, opts.Browser, dependencies)
-	if errors.Is(err, session.ErrNoSession) {
-		return writeSessionStatus(stdout, false)
-	}
+func runAuthStatus(ctx context.Context, opts Options, stdout, stderr io.Writer, dependencies Dependencies) error {
+	result, err := discoverSessions(ctx, opts, dependencies)
 	if err != nil {
 		return err
+	}
+	if err := reportDiscoveryWarnings(stderr, opts, result.Warnings); err != nil {
+		return err
+	}
+	if len(result.Sessions) == 0 {
+		return writeSessionStatus(stdout, false)
 	}
 	client, err := newEuriaClient(dependencies)
 	if err != nil {
 		return err
 	}
-	sessions, err = signedInSessions(ctx, client, sessions)
+	sessions, err := signedInSessions(ctx, client, result.Sessions)
 	if err != nil {
 		return err
 	}
-	if len(sessions) > 1 {
-		return requireProfileSelection(opts.ChromeProfile, sessionProfiles(sessions))
-	}
-	return writeSessionStatus(stdout, len(sessions) == 1)
+	return writeSessionStatus(stdout, len(sessions) > 0)
 }
 
-func runChat(ctx context.Context, opts Options, stdin io.Reader, stdout io.Writer, dependencies Dependencies) error {
+func runChat(ctx context.Context, opts Options, stdin io.Reader, stdout, stderr io.Writer, dependencies Dependencies) error {
 	prompt, err := ReadPrompt(opts, stdin)
 	if err != nil {
 		return err
@@ -286,14 +211,17 @@ func runChat(ctx context.Context, opts Options, stdin io.Reader, stdout io.Write
 		return runGuestChat(ctx, client, opts, prompt, stdout)
 	}
 
-	sessions, err := discoverSessions(ctx, opts.ChromeProfile, opts.Browser, dependencies)
+	discovery, err := discoverSessions(ctx, opts, dependencies)
 	if err != nil {
-		if errors.Is(err, session.ErrNoSession) {
-			return noSignedInSessionError()
-		}
 		return err
 	}
-	sessions, err = signedInSessions(ctx, client, sessions)
+	if err := reportDiscoveryWarnings(stderr, opts, discovery.Warnings); err != nil {
+		return err
+	}
+	if len(discovery.Sessions) == 0 {
+		return noSignedInSessionError()
+	}
+	sessions, err := signedInSessions(ctx, client, discovery.Sessions)
 	if err != nil {
 		return err
 	}
@@ -379,43 +307,31 @@ func readHistory(path string) ([]euria.HistoryMessage, error) {
 	return messages, nil
 }
 
-func discoverSessions(ctx context.Context, selector, browser string, dependencies Dependencies) ([]session.Session, error) {
+func discoverSessions(ctx context.Context, opts Options, dependencies Dependencies) (session.DiscoveryResult, error) {
+	options, err := discoveryOptions(opts)
+	if err != nil {
+		return session.DiscoveryResult{}, err
+	}
 	source := dependencies.CookieSource
 	if source == nil {
-		source = session.NewChromiumCookieSource()
+		source = session.NewSweetcookieCookieSource()
 	}
-	source = selectBrowserSource(source, browser)
-	return session.Discover(ctx, source, selector)
+	return source.Discover(ctx, options)
 }
 
-type browserCookieSource struct {
-	source  session.CookieSource
-	browser string
-}
-
-func (s browserCookieSource) Profiles(ctx context.Context, selector string) ([]session.Profile, error) {
-	profiles, err := s.source.Profiles(ctx, selector)
-	if err != nil || s.browser == "" {
-		return profiles, err
+func reportDiscoveryWarnings(writer io.Writer, opts Options, warnings []string) error {
+	if len(opts.Browsers) == 0 || writer == nil {
+		return nil
 	}
-	filtered := make([]session.Profile, 0, len(profiles))
-	for _, profile := range profiles {
-		if profile.Browser == s.browser {
-			filtered = append(filtered, profile)
+	for _, warning := range warnings {
+		if strings.TrimSpace(warning) == "" {
+			continue
+		}
+		if _, err := fmt.Fprintf(writer, "euria: warning: %s\n", warning); err != nil {
+			return err
 		}
 	}
-	return filtered, nil
-}
-
-func (s browserCookieSource) Cookies(ctx context.Context, profile session.Profile, target *url.URL) ([]*http.Cookie, error) {
-	return s.source.Cookies(ctx, profile, target)
-}
-
-func selectBrowserSource(source session.CookieSource, browser string) session.CookieSource {
-	if browser == "" {
-		return source
-	}
-	return browserCookieSource{source: source, browser: browser}
+	return nil
 }
 
 func selectSession(sessions []session.Session) (session.Session, error) {
@@ -423,7 +339,7 @@ func selectSession(sessions []session.Session) (session.Session, error) {
 		return session.Session{}, noSignedInSessionError()
 	}
 	if len(sessions) > 1 {
-		return session.Session{}, requireProfileSelection("", sessionProfiles(sessions))
+		return session.Session{}, errors.New("multiple signed-in Euria sessions were found; select one with --browser NAME and optionally --profile NAME|PATH")
 	}
 	return sessions[0], nil
 }
@@ -449,7 +365,7 @@ func signedInSessions(ctx context.Context, client *euria.Client, candidates []se
 	for _, candidate := range candidates {
 		ok, err := client.AuthStatus(ctx, candidate)
 		if err != nil {
-			return nil, err
+			return nil, redactSessionError(err, candidate)
 		}
 		if ok {
 			signedIn = append(signedIn, candidate)

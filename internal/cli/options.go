@@ -22,7 +22,6 @@ type Options struct {
 	ChromeProfile  string
 	Profile        string
 	Browsers       []session.Browser
-	Browser        string // Deprecated compatibility field for the pre-multi-browser runner.
 	AccountID      string
 	ConversationID string
 }
@@ -74,9 +73,6 @@ func Parse(args []string) (Options, error) {
 		return Options{}, err
 	}
 	opts.Browsers = browsers
-	if len(browsers) > 0 {
-		opts.Browser = string(browsers[0])
-	}
 	if help {
 		opts.Command = "help"
 		return opts, nil
@@ -151,13 +147,6 @@ func parseBrowsers(values []string) ([]session.Browser, error) {
 
 func discoveryOptions(opts Options) (session.DiscoveryOptions, error) {
 	browsers := opts.Browsers
-	if len(browsers) == 0 && opts.Browser != "" {
-		parsed, err := parseBrowsers([]string{opts.Browser})
-		if err != nil {
-			return session.DiscoveryOptions{}, err
-		}
-		browsers = parsed
-	}
 	profile := opts.Profile
 	if opts.ChromeProfile != "" {
 		if profile != "" && profile != opts.ChromeProfile {
@@ -255,7 +244,7 @@ Notes:
   saved to your Euria account. Without --browser, supported default browser
   sources are checked. Use --browser more than once to select several sources.
   An explicit --profile or --chrome-profile requires exactly one --browser.
-  Supported names include chrome, chromium, edge, brave, firefox, safari,
-  opera, vivaldi, arc, zen, and other Sweetcookie-supported browsers.
+  Supported names: chrome, chromium, edge, brave, vivaldi, opera, arc, helium,
+  dia, comet, atlas, whale, firefox, zen, floorp, waterfox, librewolf, safari.
 `
 }

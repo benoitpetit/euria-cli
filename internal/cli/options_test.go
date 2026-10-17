@@ -32,7 +32,6 @@ func TestParseChatFlags(t *testing.T) {
 		Output:         "json",
 		ChromeProfile:  "/home/test/.config/chromium/Default",
 		Browsers:       []session.Browser{"chromium"},
-		Browser:        "chromium",
 		AccountID:      "account-123",
 		ConversationID: "conversation-456",
 	}
@@ -56,6 +55,25 @@ func TestParseRejectsUnsupportedBrowser(t *testing.T) {
 	for _, name := range []string{"unknown", "inline"} {
 		if _, err := parseBrowsers([]string{name}); err == nil {
 			t.Errorf("parseBrowsers(%q) succeeded, want unsupported browser error", name)
+		}
+	}
+}
+
+func TestParseAcceptsSupportedBrowserNames(t *testing.T) {
+	want := []string{
+		"chrome", "chromium", "edge", "brave", "vivaldi", "opera", "arc", "helium", "dia",
+		"comet", "atlas", "whale", "firefox", "zen", "floorp", "waterfox", "librewolf", "safari",
+	}
+	got, err := parseBrowsers(want)
+	if err != nil {
+		t.Fatalf("parseBrowsers() error = %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parseBrowsers() returned %d names, want %d", len(got), len(want))
+	}
+	for index, browser := range got {
+		if string(browser) != want[index] {
+			t.Errorf("browser[%d] = %q, want %q", index, browser, want[index])
 		}
 	}
 }
@@ -130,7 +148,7 @@ func TestParseAuthLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if got.Command != "auth-login" || got.ChromeProfile != "Profile 2" || got.Browser != "chrome" {
+	if got.Command != "auth-login" || got.ChromeProfile != "Profile 2" || !reflect.DeepEqual(got.Browsers, []session.Browser{"chrome"}) {
 		t.Fatalf("Parse() = %#v, want auth-login using Profile 2", got)
 	}
 }
@@ -155,6 +173,7 @@ func TestUsageDocumentsCommandsFlagsAndExamples(t *testing.T) {
 		"--conversation", "--list-models", "--help", "-h",
 		"--history is available only with --guest", "cat prompt.txt | euria",
 		"--output json", "--conversation CONVERSATION_ID",
+		"--browser chrome --browser firefox", "librewolf, safari",
 	} {
 		if !strings.Contains(usage, expected) {
 			t.Errorf("Usage() is missing %q", expected)

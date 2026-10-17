@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,51 +17,69 @@ import (
 )
 
 type workflowCookieSource struct {
-	profiles        []session.Profile
-	cookies         map[string][]*http.Cookie
-	err             error
-	profileSelector string
-	profileCalls    int
+	profiles       []session.Profile
+	cookies        map[string][]*http.Cookie
+	profileErrors  map[string]error
+	err            error
+	discoveryCalls int
+	options        []session.DiscoveryOptions
 }
 
-func (s *workflowCookieSource) Profiles(_ context.Context, selector string) ([]session.Profile, error) {
-	s.profileCalls++
-	s.profileSelector = selector
-	if s.err != nil || selector == "" {
-		return append([]session.Profile(nil), s.profiles...), s.err
+func (s *workflowCookieSource) Discover(_ context.Context, options session.DiscoveryOptions) (session.DiscoveryResult, error) {
+	s.discoveryCalls++
+	s.options = append(s.options, options)
+	if s.err != nil {
+		return session.DiscoveryResult{}, s.err
 	}
-	var selected []session.Profile
+	result := session.DiscoveryResult{}
 	for _, profile := range s.profiles {
-		if profile.Name == selector || filepath.Clean(profile.Path) == filepath.Clean(selector) {
-			selected = append(selected, profile)
+		if len(options.Browsers) > 0 && !containsBrowser(options.Browsers, profile.Browser) {
+			continue
+		}
+		if selected, ok := options.Profiles[profile.Browser]; ok && selected != profile.Name && filepath.Clean(selected) != filepath.Clean(profile.Path) {
+			continue
+		}
+		if err := s.profileErrors[profile.Path]; err != nil {
+			result.Warnings = append(result.Warnings, err.Error())
+			continue
+		}
+		cookies := append([]*http.Cookie(nil), s.cookies[profile.Path]...)
+		if len(cookies) == 0 {
+			continue
+		}
+		userSession := session.Session{Profile: profile, Cookies: cookies}
+		for _, cookie := range cookies {
+			if cookie.Name == "EURIA-API-XSRF-TOKEN" {
+				userSession.XsrfToken = cookie.Value
+			}
+		}
+		result.Sessions = append(result.Sessions, userSession)
+	}
+	return result, nil
+}
+
+func containsBrowser(browsers []session.Browser, browser session.Browser) bool {
+	for _, candidate := range browsers {
+		if candidate == browser {
+			return true
 		}
 	}
-	return selected, nil
-}
-
-func (s *workflowCookieSource) Cookies(_ context.Context, profile session.Profile, _ *url.URL) ([]*http.Cookie, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.cookies[profile.Path], nil
+	return false
 }
 
 type workflowBrowserLauncher struct {
-	profiles []session.Profile
-	targets  []string
-	err      error
-	onLaunch func(session.Profile)
+	targets []string
+	err     error
+	onOpen  func()
 }
 
-func (l *workflowBrowserLauncher) Launch(profile session.Profile, target string) error {
-	l.profiles = append(l.profiles, profile)
+func (l *workflowBrowserLauncher) Open(target string) error {
 	l.targets = append(l.targets, target)
-	if l.onLaunch != nil {
-		l.onLaunch(profile)
+	if l.onOpen != nil {
+		l.onOpen()
 	}
 	return l.err
 }
-
 func workflowSessionSource() *workflowCookieSource {
 	profile := session.Profile{Browser: "chrome", Name: "Default", Path: "/test/chrome/Default"}
 	return &workflowCookieSource{
@@ -74,6 +90,126 @@ func workflowSessionSource() *workflowCookieSource {
 				{Name: "EURIA-API-XSRF-TOKEN", Value: "xsrf-token-secret", Path: "/"},
 			},
 		},
+	}
+}
+
+func TestDiscoverSessionsUsesSelectedBrowsersAndProfiles(t *testing.T) {
+	selected := session.Profile{Browser: "firefox", Name: "work", Path: "/firefox/work/cookies.sqlite"}
+	other := session.Profile{Browser: "chrome", Name: "Default", Path: "/chrome/Default/Cookies"}
+	source := &workflowCookieSource{
+		profiles: []session.Profile{other, selected},
+		cookies: map[string][]*http.Cookie{
+			selected.Path: {{Name: "EURIA_SESSION", Value: "selected", Path: "/"}},
+			other.Path:    {{Name: "EURIA_SESSION", Value: "not-selected", Path: "/"}},
+		},
+	}
+	opts := Options{Browsers: []session.Browser{"firefox"}, Profile: "work"}
+	result, err := discoverSessions(context.Background(), opts, Dependencies{CookieSource: source})
+	if err != nil {
+		t.Fatalf("discoverSessions() error = %v", err)
+	}
+	if len(result.Sessions) != 1 || result.Sessions[0].Profile.Path != selected.Path {
+		t.Fatalf("discoverSessions() sessions = %#v, want selected Firefox profile", result.Sessions)
+	}
+	if len(source.options) != 1 || source.options[0].Profiles[session.Browser("firefox")] != "work" {
+		t.Fatalf("source options = %#v, want Firefox profile work", source.options)
+	}
+}
+
+func TestDiscoverSessionsKeepsValidBrowserWhenAnotherSourceFails(t *testing.T) {
+	locked := session.Profile{Browser: "chrome", Name: "Default", Path: "/chrome/Default/Cookies"}
+	usable := session.Profile{Browser: "firefox", Name: "default", Path: "/firefox/default/cookies.sqlite"}
+	source := &workflowCookieSource{
+		profiles:      []session.Profile{locked, usable},
+		profileErrors: map[string]error{locked.Path: errors.New("browser database is locked")},
+		cookies:       map[string][]*http.Cookie{usable.Path: {{Name: "EURIA_SESSION", Value: "usable-session", Path: "/"}}},
+	}
+	result, err := discoverSessions(context.Background(), Options{}, Dependencies{CookieSource: source})
+	if err != nil {
+		t.Fatalf("discoverSessions() error = %v, want usable browser session", err)
+	}
+	if len(result.Sessions) != 1 || result.Sessions[0].Profile.Browser != "firefox" {
+		t.Fatalf("discoverSessions() sessions = %#v, want Firefox session", result.Sessions)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "locked") {
+		t.Fatalf("discoverSessions() warnings = %v, want locked-source diagnostic", result.Warnings)
+	}
+}
+
+func TestAuthLoginOpensSystemURLAndDetectsSession(t *testing.T) {
+	profile := session.Profile{Browser: "chrome", Name: "Default", Path: "/chrome/Default/Cookies"}
+	source := &workflowCookieSource{profiles: []session.Profile{profile}, cookies: map[string][]*http.Cookie{}}
+	launcher := &workflowBrowserLauncher{onOpen: func() {
+		source.cookies[profile.Path] = []*http.Cookie{{Name: "EURIA_SESSION", Value: "new-session", Path: "/"}}
+	}}
+	apiCalls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		if r.Method != http.MethodGet || r.URL.Path != "/api/1/login" {
+			t.Errorf("auth check = %s %s, want GET /api/1/login", r.Method, r.URL.Path)
+		}
+		if _, err := r.Cookie("EURIA_SESSION"); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"auth", "login", "--browser", "chrome"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
+		EuriaOrigin: server.URL, CookieSource: source, HTTPClient: server.Client(), BrowserLauncher: launcher,
+		LoginPollInterval: time.Millisecond, LoginTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(launcher.targets) != 1 || launcher.targets[0] != euriaLoginURL {
+		t.Fatalf("browser targets = %v, want %q", launcher.targets, euriaLoginURL)
+	}
+	if stdout.String() != "Euria session: signed in\n" || apiCalls != 1 {
+		t.Fatalf("stdout = %q, API calls = %d; want signed-in status after one local check", stdout.String(), apiCalls)
+	}
+}
+
+func TestAuthLoginReportsOpenerFailure(t *testing.T) {
+	launcher := &workflowBrowserLauncher{err: errors.New("system opener failed")}
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
+		CookieSource: &workflowCookieSource{}, BrowserLauncher: launcher,
+	})
+	if err == nil || !strings.Contains(err.Error(), "system opener failed") || stdout.Len() != 0 {
+		t.Fatalf("Run() error = %v, stdout = %q; want opener failure", err, stdout.String())
+	}
+}
+
+func TestAuthLoginCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	launcher := &workflowBrowserLauncher{onOpen: cancel}
+	var stdout, stderr bytes.Buffer
+	err := Run(ctx, []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
+		CookieSource: &workflowCookieSource{}, BrowserLauncher: launcher,
+		LoginPollInterval: time.Millisecond, LoginTimeout: time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cancelled") || !strings.Contains(err.Error(), "browser remains open") {
+		t.Fatalf("Run() error = %v, want cancellation guidance", err)
+	}
+	if len(launcher.targets) != 1 || launcher.targets[0] != euriaLoginURL {
+		t.Fatalf("browser targets = %v, want one Euria login URL", launcher.targets)
+	}
+}
+
+func TestAuthLoginTimeout(t *testing.T) {
+	launcher := &workflowBrowserLauncher{}
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
+		CookieSource: &workflowCookieSource{}, BrowserLauncher: launcher,
+		LoginPollInterval: time.Millisecond, LoginTimeout: 5 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("Run() error = %v, want login timeout", err)
+	}
+	if len(launcher.targets) != 1 || launcher.targets[0] != euriaLoginURL {
+		t.Fatalf("browser targets = %v, want one Euria login URL", launcher.targets)
 	}
 }
 
@@ -105,8 +241,8 @@ func TestRunDefaultsToAuthenticatedMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if guestCalls != 0 || source.profileCalls != 1 {
-		t.Fatalf("guest calls = %d, profile discovery calls = %d; want 0 and 1", guestCalls, source.profileCalls)
+	if guestCalls != 0 || source.discoveryCalls != 1 {
+		t.Fatalf("guest calls = %d, session discovery calls = %d; want 0 and 1", guestCalls, source.discoveryCalls)
 	}
 	var result struct {
 		Answer         string `json:"answer"`
@@ -175,33 +311,6 @@ func TestRunWithoutArgumentsAndPipedPromptStartsChat(t *testing.T) {
 	}
 }
 
-func TestRunAuthLoginOpensCleanChromeProfileWithoutCookiesDatabase(t *testing.T) {
-	home := t.TempDir()
-	configHome := filepath.Join(home, ".config")
-	profilePath := filepath.Join(configHome, "google-chrome", "Default")
-	if err := os.MkdirAll(profilePath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", configHome)
-	launcher := &workflowBrowserLauncher{}
-	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("clean profile should not make an Euria request")
-	}))
-	defer server.Close()
-	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		EuriaOrigin: server.URL, BrowserLauncher: launcher,
-		LoginPollInterval: time.Millisecond, LoginTimeout: 5 * time.Millisecond,
-	})
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("Run() error = %v, want timeout after opening the new profile", err)
-	}
-	if len(launcher.profiles) != 1 || launcher.profiles[0].Path != profilePath || launcher.profiles[0].Browser != "chrome" {
-		t.Fatalf("launched profiles = %#v, want clean Chrome profile %q", launcher.profiles, profilePath)
-	}
-}
-
 func TestRunAuthLoginReusesSignedInProfileWithoutLaunching(t *testing.T) {
 	source := workflowSessionSource()
 	launcher := &workflowBrowserLauncher{}
@@ -221,174 +330,8 @@ func TestRunAuthLoginReusesSignedInProfileWithoutLaunching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if stdout.String() != "Euria session: signed in\n" || len(launcher.profiles) != 0 || apiCalls != 1 || stderr.Len() != 0 {
-		t.Fatalf("stdout = %q, stderr = %q, launches = %d, API calls = %d", stdout.String(), stderr.String(), len(launcher.profiles), apiCalls)
-	}
-}
-
-func TestRunAuthLoginLaunchesProfileAndWaitsForSession(t *testing.T) {
-	profile := session.Profile{Browser: "chromium", Name: "Default", Path: "/test/chromium/Default"}
-	source := &workflowCookieSource{profiles: []session.Profile{profile}, cookies: map[string][]*http.Cookie{}}
-	launcher := &workflowBrowserLauncher{onLaunch: func(profile session.Profile) {
-		source.cookies[profile.Path] = []*http.Cookie{{Name: "EURIA_SESSION", Value: "new-session", Path: "/"}}
-	}}
-	apiCalls := 0
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiCalls++
-		if r.Method != http.MethodGet || r.URL.Path != "/api/1/login" {
-			t.Errorf("login request = %s %s, want GET /api/1/login", r.Method, r.URL.Path)
-		}
-		if cookie, _ := r.Cookie("EURIA_SESSION"); cookie == nil {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		EuriaOrigin: server.URL, CookieSource: source, HTTPClient: server.Client(), BrowserLauncher: launcher,
-		LoginPollInterval: time.Millisecond, LoginTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if stdout.String() != "Euria session: signed in\n" || stderr.String() == "" {
-		t.Fatalf("stdout = %q, stderr = %q, want success and one progress line", stdout.String(), stderr.String())
-	}
-	if len(launcher.profiles) != 1 || launcher.profiles[0].Path != profile.Path || len(launcher.targets) != 1 || launcher.targets[0] != "https://euria.infomaniak.com/api/1/login" {
-		t.Fatalf("launcher profiles = %#v, targets = %#v", launcher.profiles, launcher.targets)
-	}
-	if apiCalls != 1 {
-		t.Fatalf("auth status calls = %d, want one GET after browser sign-in", apiCalls)
-	}
-}
-
-func TestRunAuthLoginRequiresProfileWhenSeveralAreAvailable(t *testing.T) {
-	first := session.Profile{Browser: "chrome", Name: "Default", Path: "/profiles/chrome/Default"}
-	second := session.Profile{Browser: "chromium", Name: "Default", Path: "/profiles/chromium/Default"}
-	source := &workflowCookieSource{profiles: []session.Profile{first, second}, cookies: map[string][]*http.Cookie{}}
-	launcher := &workflowBrowserLauncher{}
-	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		CookieSource: source, BrowserLauncher: launcher,
-	})
-	if err == nil || !strings.Contains(err.Error(), first.Path) || !strings.Contains(err.Error(), second.Path) || !strings.Contains(err.Error(), "--chrome-profile") {
-		t.Fatalf("Run() error = %v, want both profile paths and selection guidance", err)
-	}
-	if len(launcher.profiles) != 0 {
-		t.Fatalf("launched %#v before resolving profile ambiguity", launcher.profiles)
-	}
-}
-
-func TestRunAuthLoginRequiresPathWhenProfileNameIsAmbiguous(t *testing.T) {
-	first := session.Profile{Browser: "chrome", Name: "Default", Path: "/profiles/chrome/Default"}
-	second := session.Profile{Browser: "chromium", Name: "Default", Path: "/profiles/chromium/Default"}
-	source := &workflowCookieSource{profiles: []session.Profile{first, second}, cookies: map[string][]*http.Cookie{}}
-	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login", "--chrome-profile", "Default"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		CookieSource: source, BrowserLauncher: &workflowBrowserLauncher{},
-	})
-	if err == nil || !strings.Contains(err.Error(), first.Path) || !strings.Contains(err.Error(), second.Path) {
-		t.Fatalf("Run() error = %v, want both paths for ambiguous profile name", err)
-	}
-}
-
-func TestRunAuthLoginUsesExplicitPathToDisambiguateProfiles(t *testing.T) {
-	first := session.Profile{Browser: "chrome", Name: "Default", Path: "/profiles/chrome/Default"}
-	second := session.Profile{Browser: "chromium", Name: "Default", Path: "/profiles/chromium/Default"}
-	source := &workflowCookieSource{profiles: []session.Profile{first, second}, cookies: map[string][]*http.Cookie{}}
-	launcher := &workflowBrowserLauncher{onLaunch: func(profile session.Profile) {
-		source.cookies[profile.Path] = []*http.Cookie{{Name: "EURIA_SESSION", Value: "new-session", Path: "/"}}
-	}}
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/1/login" {
-			t.Errorf("login request = %s %s, want GET /api/1/login", r.Method, r.URL.Path)
-		}
-		if cookie, _ := r.Cookie("EURIA_SESSION"); cookie == nil {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login", "--chrome-profile", second.Path}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		EuriaOrigin: server.URL, CookieSource: source, HTTPClient: server.Client(), BrowserLauncher: launcher,
-		LoginPollInterval: time.Millisecond, LoginTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if len(launcher.profiles) != 1 || launcher.profiles[0].Path != second.Path {
-		t.Fatalf("launched profiles = %#v, want explicit path %q", launcher.profiles, second.Path)
-	}
-}
-
-func TestRunAuthLoginRequiresBrowserForAmbiguousCustomPath(t *testing.T) {
-	path := "/profiles/custom/Default"
-	source := &workflowCookieSource{
-		profiles: []session.Profile{
-			{Browser: "chrome", Name: "Default", Path: path},
-			{Browser: "chromium", Name: "Default", Path: path},
-		},
-		cookies: map[string][]*http.Cookie{},
-	}
-	launcher := &workflowBrowserLauncher{}
-	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login", "--chrome-profile", path}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		CookieSource: source, BrowserLauncher: launcher,
-	})
-	if err == nil || !strings.Contains(err.Error(), "--browser chrome") || !strings.Contains(err.Error(), "--browser chromium") {
-		t.Fatalf("Run() error = %v, want both browser choices for the custom profile path", err)
-	}
-	if len(launcher.profiles) != 0 {
-		t.Fatalf("launched %#v before resolving browser ambiguity", launcher.profiles)
-	}
-}
-
-func TestRunAuthLoginSelectsBrowserForCustomPath(t *testing.T) {
-	path := "/profiles/custom/Default"
-	profile := session.Profile{Browser: "chrome", Name: "Default", Path: path}
-	source := &workflowCookieSource{
-		profiles: []session.Profile{profile, {Browser: "chromium", Name: "Default", Path: path}},
-		cookies:  map[string][]*http.Cookie{},
-	}
-	launcher := &workflowBrowserLauncher{onLaunch: func(session.Profile) {
-		source.cookies[path] = []*http.Cookie{{Name: "EURIA_SESSION", Value: "fresh", Path: "/"}}
-	}}
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/1/login" {
-			t.Errorf("login request = %s %s, want GET /api/1/login", r.Method, r.URL.Path)
-		}
-		if _, err := r.Cookie("EURIA_SESSION"); err != nil {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login", "--chrome-profile", path, "--browser", "chrome"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		EuriaOrigin: server.URL, CookieSource: source, HTTPClient: server.Client(), BrowserLauncher: launcher,
-		LoginPollInterval: time.Millisecond, LoginTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if len(launcher.profiles) != 1 || launcher.profiles[0].Browser != "chrome" || stdout.String() != "Euria session: signed in\n" {
-		t.Fatalf("launched = %#v, stdout = %q; want Chrome profile and signed-in status", launcher.profiles, stdout.String())
-	}
-}
-
-func TestRunAuthLoginReportsNoProfiles(t *testing.T) {
-	launcher := &workflowBrowserLauncher{}
-	var stdout, stderr bytes.Buffer
-	err := Run(context.Background(), []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
-		CookieSource: &workflowCookieSource{cookies: map[string][]*http.Cookie{}}, BrowserLauncher: launcher,
-	})
-	if err == nil || !strings.Contains(err.Error(), "install or start Chrome or Chromium") || len(launcher.profiles) != 0 {
-		t.Fatalf("Run() error = %v, launches = %d, want actionable missing-browser guidance without a launch", err, len(launcher.profiles))
+	if stdout.String() != "Euria session: signed in\n" || len(launcher.targets) != 0 || apiCalls != 1 || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q, launches = %d, API calls = %d", stdout.String(), stderr.String(), len(launcher.targets), apiCalls)
 	}
 }
 
@@ -428,8 +371,8 @@ func TestRunAuthLoginTimesOutWaitingForSession(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "euria auth status") {
 		t.Fatalf("Run() error = %v, want actionable timeout", err)
 	}
-	if apiCalls < 2 || len(launcher.profiles) != 1 {
-		t.Fatalf("auth status calls = %d, launches = %d, want polling after launch", apiCalls, len(launcher.profiles))
+	if apiCalls < 2 || len(launcher.targets) != 1 {
+		t.Fatalf("auth status calls = %d, launches = %d, want polling after launch", apiCalls, len(launcher.targets))
 	}
 }
 
@@ -437,7 +380,7 @@ func TestRunAuthLoginCancellationLeavesBrowserOpen(t *testing.T) {
 	profile := session.Profile{Browser: "chrome", Name: "Default", Path: "/profiles/chrome/Default"}
 	source := &workflowCookieSource{profiles: []session.Profile{profile}, cookies: map[string][]*http.Cookie{}}
 	ctx, cancel := context.WithCancel(context.Background())
-	launcher := &workflowBrowserLauncher{onLaunch: func(session.Profile) { cancel() }}
+	launcher := &workflowBrowserLauncher{onOpen: cancel}
 	var stdout, stderr bytes.Buffer
 	err := Run(ctx, []string{"auth", "login"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
 		CookieSource: source, BrowserLauncher: launcher, LoginPollInterval: time.Millisecond, LoginTimeout: time.Second,
@@ -445,8 +388,8 @@ func TestRunAuthLoginCancellationLeavesBrowserOpen(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cancelled") || !strings.Contains(err.Error(), "browser remains open") {
 		t.Fatalf("Run() error = %v, want cancellation guidance and open browser", err)
 	}
-	if len(launcher.profiles) != 1 {
-		t.Fatalf("browser launches = %d, want one launch before cancellation", len(launcher.profiles))
+	if len(launcher.targets) != 1 {
+		t.Fatalf("browser launches = %d, want one launch before cancellation", len(launcher.targets))
 	}
 }
 
@@ -466,7 +409,7 @@ func TestRunDoesNotFallbackToGuest(t *testing.T) {
 		EuriaOrigin: server.URL, CookieSource: source, HTTPClient: server.Client(),
 	})
 	want := "no signed-in Euria session found\n\n" +
-		"  Sign in at https://euria.infomaniak.com in Chrome or Chromium.\n" +
+		"  Sign in at https://euria.infomaniak.com in your browser.\n" +
 		"  Check your session with: euria auth status\n" +
 		"  Or use guest mode: euria --guest --chat \"YOUR MESSAGE\""
 	if err == nil || err.Error() != want || guestCalls != 0 {
@@ -494,7 +437,7 @@ func TestRunRejectsMultipleSignedInProfiles(t *testing.T) {
 	err := Run(context.Background(), []string{"--chat", "hello"}, strings.NewReader(""), &stdout, &stderr, Dependencies{
 		EuriaOrigin: server.URL, CookieSource: source, HTTPClient: server.Client(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "--chrome-profile") {
+	if err == nil || !strings.Contains(err.Error(), "--browser NAME") {
 		t.Fatalf("Run() error = %v, want profile selection guidance", err)
 	}
 	if loginCalls != 2 {
@@ -558,8 +501,8 @@ func TestRunGuestSkipsCookieSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if source.profileCalls != 0 || stdout.String() != "guest answer\n" {
-		t.Fatalf("profile calls = %d, output = %q; want zero calls and answer-only text", source.profileCalls, stdout.String())
+	if source.discoveryCalls != 0 || stdout.String() != "guest answer\n" {
+		t.Fatalf("session discovery calls = %d, output = %q; want zero calls and answer-only text", source.discoveryCalls, stdout.String())
 	}
 }
 
@@ -601,9 +544,41 @@ func TestRunAuthStatusReportsSignedOut(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	want := "Euria session: not signed in\n" +
-		"Sign in at https://euria.infomaniak.com in Chrome or Chromium.\n"
+		"Sign in at https://euria.infomaniak.com in your browser.\n"
 	if stdout.String() != want || apiCalls != 0 {
 		t.Fatalf("auth status output = %q, API calls = %d; want actionable signed-out state and no request", stdout.String(), apiCalls)
+	}
+}
+
+func TestRunAuthStatusSuppressesAutomaticBrowserWarnings(t *testing.T) {
+	profile := session.Profile{Browser: "chrome", Name: "Default", Path: "/chrome/Default/Cookies"}
+	source := &workflowCookieSource{
+		profiles:      []session.Profile{profile},
+		profileErrors: map[string]error{profile.Path: errors.New("browser database is locked")},
+	}
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"auth", "status"}, strings.NewReader(""), &stdout, &stderr, Dependencies{CookieSource: source})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if stdout.String() != "Euria session: not signed in\n"+signInInstruction+"\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q; want concise signed-out guidance without automatic-source noise", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunAuthStatusReportsSelectedBrowserWarnings(t *testing.T) {
+	profile := session.Profile{Browser: "chrome", Name: "Default", Path: "/chrome/Default/Cookies"}
+	source := &workflowCookieSource{
+		profiles:      []session.Profile{profile},
+		profileErrors: map[string]error{profile.Path: errors.New("browser database is locked")},
+	}
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"auth", "status", "--browser", "chrome"}, strings.NewReader(""), &stdout, &stderr, Dependencies{CookieSource: source})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(stderr.String(), "browser database is locked") || stdout.String() != "Euria session: not signed in\n"+signInInstruction+"\n" {
+		t.Fatalf("stdout = %q, stderr = %q; want selected-source diagnostic and signed-out status", stdout.String(), stderr.String())
 	}
 }
 
