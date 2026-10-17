@@ -2,8 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/benoitpetit/euria_retro/internal/session"
 )
 
 func TestParseChatFlags(t *testing.T) {
@@ -28,12 +31,77 @@ func TestParseChatFlags(t *testing.T) {
 		WebSearch:      "on",
 		Output:         "json",
 		ChromeProfile:  "/home/test/.config/chromium/Default",
+		Browsers:       []session.Browser{"chromium"},
 		Browser:        "chromium",
 		AccountID:      "account-123",
 		ConversationID: "conversation-456",
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseAcceptsRepeatedBrowsersInOrder(t *testing.T) {
+	got, err := Parse([]string{"--browser", "firefox", "--browser", "chrome", "--chat", "hello"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := []session.Browser{"firefox", "chrome"}
+	if !reflect.DeepEqual(got.Browsers, want) {
+		t.Fatalf("Parse().Browsers = %v, want %v", got.Browsers, want)
+	}
+}
+
+func TestParseRejectsUnsupportedBrowser(t *testing.T) {
+	for _, name := range []string{"unknown", "inline"} {
+		if _, err := parseBrowsers([]string{name}); err == nil {
+			t.Errorf("parseBrowsers(%q) succeeded, want unsupported browser error", name)
+		}
+	}
+}
+
+func TestParseProfileRequiresOneBrowser(t *testing.T) {
+	for _, args := range [][]string{
+		{"--profile", "Default", "--chat", "hello"},
+		{"--profile", "Default", "--browser", "chrome", "--browser", "firefox", "--chat", "hello"},
+	} {
+		if _, err := Parse(args); err == nil {
+			t.Errorf("Parse(%q) succeeded, want one-browser profile validation", args)
+		}
+	}
+	got, err := Parse([]string{"--profile", "Default", "--browser", "firefox", "--chat", "hello"})
+	if err != nil {
+		t.Fatalf("Parse() with one selected browser error = %v", err)
+	}
+	options, err := discoveryOptions(got)
+	if err != nil {
+		t.Fatalf("discoveryOptions() error = %v", err)
+	}
+	if options.Profiles[session.Browser("firefox")] != "Default" {
+		t.Fatalf("discoveryOptions().Profiles = %v, want Firefox Default", options.Profiles)
+	}
+}
+
+func TestParseChromeProfileAlias(t *testing.T) {
+	got, err := Parse([]string{"--browser", "chrome", "--chrome-profile", "Default", "--chat", "hello"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	options, err := discoveryOptions(got)
+	if err != nil {
+		t.Fatalf("discoveryOptions() error = %v", err)
+	}
+	if options.Profiles[session.Browser("chrome")] != "Default" {
+		t.Fatalf("--chrome-profile alias produced profiles %v, want Chrome Default", options.Profiles)
+	}
+}
+
+func TestParseRejectsConflictingProfileFlags(t *testing.T) {
+	_, err := Parse([]string{
+		"--browser", "chrome", "--profile", "Default", "--chrome-profile", "Profile 2", "--chat", "hello",
+	})
+	if err == nil {
+		t.Fatal("Parse() accepted conflicting --profile and --chrome-profile values")
 	}
 }
 
@@ -82,7 +150,7 @@ func TestParseAuthLoginRejectsChatOptions(t *testing.T) {
 func TestUsageDocumentsCommandsFlagsAndExamples(t *testing.T) {
 	usage := Usage()
 	for _, expected := range []string{
-		"euria auth login", "euria auth status", "--chat", "--guest", "--model", "--browser",
+		"euria auth login", "euria auth status", "--chat", "--guest", "--model", "--browser", "--profile",
 		"--web-search", "--history", "--output", "--chrome-profile", "--account",
 		"--conversation", "--list-models", "--help", "-h",
 		"--history is available only with --guest", "cat prompt.txt | euria",
@@ -96,8 +164,8 @@ func TestUsageDocumentsCommandsFlagsAndExamples(t *testing.T) {
 
 func TestParseRejectsInvalidBrowserAndGuestBrowserSelection(t *testing.T) {
 	for _, args := range [][]string{
-		{"--browser", "firefox", "--chat", "hello"},
-		{"auth", "login", "--browser", "firefox"},
+		{"--browser", "unknown", "--chat", "hello"},
+		{"auth", "login", "--browser", "inline"},
 		{"--guest", "--browser", "chrome", "--chat", "hello"},
 	} {
 		if _, err := Parse(args); err == nil {

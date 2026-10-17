@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/benoitpetit/euria_retro/internal/session"
 )
 
 // Options contains the command and flags selected by the user.
@@ -18,7 +20,9 @@ type Options struct {
 	HistoryPath    string
 	Output         string
 	ChromeProfile  string
-	Browser        string
+	Profile        string
+	Browsers       []session.Browser
+	Browser        string // Deprecated compatibility field for the pre-multi-browser runner.
 	AccountID      string
 	ConversationID string
 }
@@ -45,8 +49,10 @@ func Parse(args []string) (Options, error) {
 	fs := flag.NewFlagSet("euria", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var listModels, help bool
+	var browserValues browserFlags
 	fs.StringVar(&opts.ChromeProfile, "chrome-profile", "", "Select a Chrome/Chromium profile by name or path")
-	fs.StringVar(&opts.Browser, "browser", "", "Select chrome or chromium when a profile path is ambiguous")
+	fs.StringVar(&opts.Profile, "profile", "", "Select one browser profile by name or path")
+	fs.Var(&browserValues, "browser", "Select a browser source; may be repeated")
 	fs.BoolVar(&help, "help", false, "Show this help")
 	fs.BoolVar(&help, "h", false, "Show this help")
 	if authCommand == "" {
@@ -63,6 +69,14 @@ func Parse(args []string) (Options, error) {
 	if err := fs.Parse(flagArgs); err != nil {
 		return Options{}, err
 	}
+	browsers, err := parseBrowsers(browserValues)
+	if err != nil {
+		return Options{}, err
+	}
+	opts.Browsers = browsers
+	if len(browsers) > 0 {
+		opts.Browser = string(browsers[0])
+	}
 	if help {
 		opts.Command = "help"
 		return opts, nil
@@ -70,15 +84,18 @@ func Parse(args []string) (Options, error) {
 	if len(fs.Args()) != 0 {
 		return Options{}, fmt.Errorf("unexpected positional argument %q; use --chat MSG or provide the prompt on stdin", fs.Args()[0])
 	}
-	if opts.Browser != "" && opts.Browser != "chrome" && opts.Browser != "chromium" {
-		return Options{}, fmt.Errorf("invalid --browser value %q; choose chrome or chromium", opts.Browser)
+	if opts.Profile != "" && opts.ChromeProfile != "" && opts.Profile != opts.ChromeProfile {
+		return Options{}, fmt.Errorf("--profile and --chrome-profile select different profiles; use only one")
 	}
 	if authCommand != "" {
+		if _, err := discoveryOptions(opts); err != nil {
+			return Options{}, err
+		}
 		return opts, nil
 	}
 	if listModels {
 		opts.Command = "list-models"
-		if opts.Prompt != "" || opts.Guest || opts.HistoryPath != "" || opts.AccountID != "" || opts.ConversationID != "" {
+		if opts.Prompt != "" || opts.Guest || opts.HistoryPath != "" || opts.AccountID != "" || opts.ConversationID != "" || opts.Profile != "" || opts.ChromeProfile != "" || len(opts.Browsers) != 0 {
 			return Options{}, fmt.Errorf("--list-models cannot be combined with chat options")
 		}
 		return opts, nil
@@ -96,10 +113,67 @@ func Parse(args []string) (Options, error) {
 	if opts.HistoryPath != "" && !opts.Guest {
 		return Options{}, fmt.Errorf("--history is available only with --guest")
 	}
-	if opts.Guest && (opts.ChromeProfile != "" || opts.Browser != "" || opts.AccountID != "" || opts.ConversationID != "") {
-		return Options{}, fmt.Errorf("--chrome-profile, --browser, --account, and --conversation require authenticated mode")
+	if opts.Guest && (opts.ChromeProfile != "" || opts.Profile != "" || len(opts.Browsers) != 0 || opts.AccountID != "" || opts.ConversationID != "") {
+		return Options{}, fmt.Errorf("--profile, --chrome-profile, --browser, --account, and --conversation require authenticated mode")
+	}
+	if _, err := discoveryOptions(opts); err != nil {
+		return Options{}, err
 	}
 	return opts, nil
+}
+
+type browserFlags []string
+
+func (f *browserFlags) String() string { return strings.Join(*f, ",") }
+
+func (f *browserFlags) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+var supportedBrowsers = map[string]struct{}{
+	"chrome": {}, "chromium": {}, "edge": {}, "brave": {}, "vivaldi": {}, "opera": {},
+	"arc": {}, "helium": {}, "dia": {}, "comet": {}, "atlas": {}, "whale": {},
+	"firefox": {}, "zen": {}, "floorp": {}, "waterfox": {}, "librewolf": {}, "safari": {},
+}
+
+func parseBrowsers(values []string) ([]session.Browser, error) {
+	browsers := make([]session.Browser, 0, len(values))
+	for _, value := range values {
+		name := strings.ToLower(strings.TrimSpace(value))
+		if _, ok := supportedBrowsers[name]; !ok {
+			return nil, fmt.Errorf("unsupported --browser value %q; see --help for supported browser names", value)
+		}
+		browsers = append(browsers, session.Browser(name))
+	}
+	return browsers, nil
+}
+
+func discoveryOptions(opts Options) (session.DiscoveryOptions, error) {
+	browsers := opts.Browsers
+	if len(browsers) == 0 && opts.Browser != "" {
+		parsed, err := parseBrowsers([]string{opts.Browser})
+		if err != nil {
+			return session.DiscoveryOptions{}, err
+		}
+		browsers = parsed
+	}
+	profile := opts.Profile
+	if opts.ChromeProfile != "" {
+		if profile != "" && profile != opts.ChromeProfile {
+			return session.DiscoveryOptions{}, fmt.Errorf("--profile and --chrome-profile select different profiles; use only one")
+		}
+		profile = opts.ChromeProfile
+	}
+	result := session.DiscoveryOptions{Browsers: append([]session.Browser(nil), browsers...)}
+	if profile == "" {
+		return result, nil
+	}
+	if len(browsers) != 1 {
+		return session.DiscoveryOptions{}, fmt.Errorf("a profile must be paired with exactly one --browser; for example: --browser chrome --profile Default")
+	}
+	result.Profiles = map[session.Browser]string{browsers[0]: profile}
+	return result, nil
 }
 
 // ReadPrompt returns the argument prompt or reads one prompt from stdin.
@@ -139,12 +213,12 @@ func Usage() string {
   euria
   euria --chat MSG [OPTIONS]
   euria [OPTIONS] < prompt.txt
-  euria auth login [--chrome-profile NAME|PATH] [--browser chrome|chromium]
-  euria auth status [--chrome-profile NAME|PATH] [--browser chrome|chromium]
+  euria auth login [--browser NAME ...] [--profile NAME|PATH]
+  euria auth status [--browser NAME ...] [--profile NAME|PATH]
 
 Commands:
-  auth login           Open the Infomaniak sign-in flow in Chrome/Chromium
-  auth status          Check whether a Chrome/Chromium profile has a valid Euria session
+  auth login           Open the Infomaniak sign-in flow in your default browser
+  auth status          Check for a valid Euria session in selected browser sources
   --list-models        Print the model names supported by this CLI
   chat                 Send one prompt with --chat MSG or from stdin
 
@@ -155,9 +229,10 @@ Options:
   --web-search MODE      Search: auto, on, or off (default: auto)
   --history FILE         JSON array of prior messages; guest mode only
   --output FORMAT        Output: text or json (default: text)
+  --browser NAME         Select a browser source; repeat to check several
+  --profile NAME|PATH    Select one profile for the selected browser
   --chrome-profile NAME|PATH
-                         Select a Chrome/Chromium profile when ambiguous
-  --browser NAME         Select chrome or chromium for an ambiguous custom path
+                         Alias for --profile (kept for compatibility)
   --account ID           Select an Euria account when the session has multiple accounts
   --conversation ID      Continue an existing authenticated conversation
   --list-models          Print supported model names
@@ -165,9 +240,10 @@ Options:
 
 Examples:
   euria auth login
-  euria auth login --chrome-profile "Profile 2"
-  euria auth login --chrome-profile /path/to/Default --browser chrome
   euria auth status
+  euria auth status --browser chrome --profile "Profile 2"
+  euria auth status --browser chrome --browser firefox
+  euria auth login --browser chrome --chrome-profile /path/to/Default
   euria --chat "Explain DNS in one paragraph."
   euria --chat "Explain DNS." --output json
   euria --guest --chat "What causes the northern lights?"
@@ -176,8 +252,10 @@ Examples:
 
 Notes:
   --history is available only with --guest. Authenticated conversations are
-  saved to your Euria account. Profile names may be ambiguous; pass a path.
-  For a custom path outside known Chrome/Chromium directories, also pass
-  --browser chrome or --browser chromium.
+  saved to your Euria account. Without --browser, supported default browser
+  sources are checked. Use --browser more than once to select several sources.
+  An explicit --profile or --chrome-profile requires exactly one --browser.
+  Supported names include chrome, chromium, edge, brave, firefox, safari,
+  opera, vivaldi, arc, zen, and other Sweetcookie-supported browsers.
 `
 }
