@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Run tests
+        run: go test ./...
+      - name: Run vet
+        run: go vet ./...
+
+  build:
+    name: Build (${{ matrix.asset }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            goarm: ""
+            asset: euria_linux_amd64
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            asset: euria_linux_armv7
+          - goos: linux
+            goarch: arm64
+            goarm: ""
+            asset: euria_linux_arm64
+          - goos: windows
+            goarch: amd64
+            goarm: ""
+            asset: euria_windows_amd64.exe
+          - goos: windows
+            goarch: arm64
+            goarm: ""
+            asset: euria_windows_arm64.exe
+          - goos: darwin
+            goarch: amd64
+            goarm: ""
+            asset: euria_darwin_amd64
+          - goos: darwin
+            goarch: arm64
+            goarm: ""
+            asset: euria_darwin_arm64
+    env:
+      CGO_ENABLED: 0
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Cross-compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [[ -n "${{ matrix.goarm }}" ]]; then
+            export GOARM="${{ matrix.goarm }}"
+          fi
+          go build -trimpath -o "dist/${{ matrix.asset }}" ./cmd/euria
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish release
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify assets and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            euria_linux_amd64
+            euria_linux_armv7
+            euria_linux_arm64
+            euria_windows_amd64.exe
+            euria_windows_arm64.exe
+            euria_darwin_amd64
+            euria_darwin_arm64
+          )
+          for asset in "${expected[@]}"; do
+            test -f "dist/$asset"
+          done
+          count=$(find dist -maxdepth 1 -type f | wc -l)
+          test "$count" -eq "${#expected[@]}"
+          (cd dist && sha256sum euria_* > SHA256SUMS)
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/euria_* dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag

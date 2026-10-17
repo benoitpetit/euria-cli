@@ -5,20 +5,62 @@
 <h1 align="center">Euria Retro</h1>
 
 <p align="center">
-  A Go command-line client for Euria, with Chrome/Chromium session reuse and an explicit guest mode.
+  A Go command-line client for Euria, with multi-browser session reuse and guest mode.
 </p>
 
 ---
 
-## Requirements
+## Platforms and browsers
 
-- Linux and Go 1.25 or newer.
-- Chrome or Chromium with an active Euria sign-in for authenticated chat.
-- A desktop keyring supported by the browser, such as GNOME Secret Service or KDE Wallet, to decrypt browser cookies.
-- `make` is optional; it provides build, install, check, and test targets.
-- `jq` is optional for extracting fields from JSON output.
+Euria Retro runs on Linux, Windows, and macOS. Prebuilt releases are provided for the targets listed below; Go 1.25 or newer is needed only when building from source.
+
+| Browser families | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| Chrome, Chromium, Edge, Brave, Vivaldi, Opera, Whale | Yes | Yes | Yes |
+| Firefox, Zen, Floorp, Waterfox, LibreWolf | Yes | Yes | Yes |
+| Arc, Comet | — | Yes | Yes |
+| Dia, ChatGPT Atlas, Safari | — | — | Yes |
+| Helium | — | — | Yes, selected explicitly |
+
+Cookie support is provided by [Sweetcookie](https://github.com/steipete/sweetcookie). Some browser versions or profile layouts may not be readable. On Windows, recent Chromium builds can use app-bound encryption that prevents cookie decryption. A system keychain or keyring prompt may appear when the browser protects cookies with OS credentials.
+
+`auth login` opens the system's default browser. Linux uses `xdg-open`; macOS uses `open`; Windows uses the system URL handler. Finish the Euria sign-in in the opened browser. The selected `--browser` controls which cookie sources are checked, and does not force the OS to open that same browser.
 
 ## Install
+
+Download the asset for your OS and architecture from [GitHub Releases](https://github.com/benoitpetit/euria_retro/releases). Release asset names:
+
+| Platform | Asset |
+| --- | --- |
+| Linux x86-64 | `euria_linux_amd64` |
+| Linux ARMv7 | `euria_linux_armv7` |
+| Linux ARM64 / AArch64 | `euria_linux_arm64` |
+| Windows x86-64 | `euria_windows_amd64.exe` |
+| Windows ARM64 | `euria_windows_arm64.exe` |
+| macOS Intel | `euria_darwin_amd64` |
+| macOS Apple silicon | `euria_darwin_arm64` |
+
+For example, download and run the latest Linux x86-64 build:
+
+```sh
+curl -fL https://github.com/benoitpetit/euria_retro/releases/latest/download/euria_linux_amd64 -o euria_linux_amd64
+curl -fL https://github.com/benoitpetit/euria_retro/releases/latest/download/SHA256SUMS -o SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+chmod +x euria_linux_amd64
+./euria_linux_amd64 --help
+```
+
+On Windows PowerShell, download the matching `.exe` asset from the release page and run `./euria_windows_amd64.exe --help` (or use the ARM64 asset on Windows ARM devices).
+
+Each release includes `SHA256SUMS`. On Linux, verify the downloaded asset from the same directory with:
+
+```sh
+sha256sum -c SHA256SUMS
+```
+
+On macOS, verify one downloaded asset with `grep ' euria_darwin_arm64$' SHA256SUMS | shasum -a 256 -c -` (replace the asset name as needed). On Windows PowerShell, compare the asset's `Get-FileHash -Algorithm SHA256` result with its matching hash in `SHA256SUMS`.
+
+To build and install from source on Linux or macOS:
 
 ```sh
 git clone https://github.com/benoitpetit/euria_retro.git
@@ -27,52 +69,32 @@ make build
 make install
 ```
 
-By default, `make install` places the executable at `~/.local/bin/euria`. Set `BINDIR` to choose another install directory. You can also use `bin/euria` directly after `make build`.
+`make install` places `euria` in `~/.local/bin` by default. Set `BINDIR` to choose another directory. `make` is optional; `jq` is optional for extracting JSON fields.
+
+The release workflow runs Go tests and `go vet` on native Linux, Windows, and macOS runners, then cross-compiles the seven assets above whenever a `v*` tag is pushed. Adding the workflow does not rebuild earlier tags; the next release is triggered by a new tag.
 
 ## Sign in
 
-Run `euria auth login` to reuse a valid session or open Euria's Infomaniak sign-in flow in your Chrome/Chromium profile. Complete the normal browser sign-in; the CLI detects the session after Euria accepts it. The CLI never asks for or enters your password. Press `Ctrl+C` to stop waiting without closing the browser. A visible Euria chat page can still be in guest mode until the account sign-in finishes.
+Run `euria auth login` to check for an existing Euria session or open the Infomaniak sign-in page in your default browser. The CLI never asks for or enters your password. It waits until the selected browser sources contain a session accepted by Euria. Press `Ctrl+C` to stop waiting without closing the browser.
 
-Euria Retro reads Euria-scoped cookies from the selected local profile using a read-only database connection. Cookie values stay in memory; the CLI does not copy the browser database to a temporary file or save session data. A desktop keyring prompt may appear while encrypted cookies are decrypted.
+By default, Euria Retro checks the browser profiles Sweetcookie discovers automatically. Use repeated `--browser` flags to restrict the search. Use `--profile` with exactly one browser to select a profile by name or path; `--chrome-profile` remains an alias for compatibility.
 
 ```sh
 euria auth login
-euria auth login --chrome-profile "Profile 2"
-euria auth login --chrome-profile /path/to/Default --browser chrome
-```
-
-Check the detected session:
-
-```sh
 euria auth status
+euria auth status --browser chrome --profile "Profile 2"
+euria auth status --browser chrome --browser firefox
+euria --chat "Explain DNS in one paragraph." --browser chrome --profile "Profile 2"
+euria auth login --browser chrome --chrome-profile /path/to/Default
 ```
 
-The command reports whether a session was found in Chrome or Chromium. If it reports `not signed in`, run `euria auth login` to open a profile and sign in. For a one-off prompt without a signed-in account, use guest mode; it is subject to Euria's guest quota:
+Run `euria auth status` to check whether Euria accepts the discovered session. If no session is found, `euria auth login` opens the sign-in page. For a one-off prompt without a signed-in account, use guest mode; Euria applies its guest quota:
 
 ```sh
 euria --guest --chat "Hello!"
 ```
 
-If several profiles are signed in, select one explicitly. Use its full directory path if the same profile name exists in both Chrome and Chromium:
-
-```sh
-euria auth status --chrome-profile "Profile 2"
-euria --chat "Explain DNS in one paragraph." --chrome-profile "Profile 2"
-```
-
-For a custom profile directory outside Chrome's or Chromium's usual locations, specify its browser explicitly:
-
-```sh
-euria auth login --chrome-profile /path/to/Default --browser chrome
-euria auth status --chrome-profile /path/to/Default --browser chromium
-euria --chat "Explain DNS." --chrome-profile /path/to/Default --browser chrome
-```
-
-You can also pass a profile directory path. If the browser profile contains more than one Euria account, provide the account ID you want to use:
-
-```sh
-euria --chat "Give me a short summary." --account 12345
-```
+Sweetcookie reads Chromium and Firefox cookie databases through temporary snapshots, including their write-ahead log sidecars. Cookie values stay in process memory; Euria Retro does not persist session data. If the same profile name exists in multiple browsers, select the browser first and then pass its profile name or path.
 
 ## Quick start
 
@@ -87,9 +109,10 @@ The help and README use the same command examples:
 
 ```sh
 euria auth login
-euria auth login --chrome-profile "Profile 2"
-euria auth login --chrome-profile /path/to/Default --browser chrome
 euria auth status
+euria auth status --browser chrome --profile "Profile 2"
+euria auth status --browser chrome --browser firefox
+euria auth login --browser chrome --chrome-profile /path/to/Default
 euria --chat "Explain DNS in one paragraph."
 euria --chat "Explain DNS." --output json
 euria --guest --chat "What causes the northern lights?"
@@ -157,16 +180,17 @@ euria --guest --chat "How does chlorophyll help?" --history history.json
 
 | Option | Values | Default | Description |
 | --- | --- | --- | --- |
-| `auth login` | optional `--chrome-profile NAME or PATH`, `--browser chrome or chromium` | — | Reuse a session or open Infomaniak sign-in in Chrome/Chromium and wait for Euria to accept it. |
-| `auth status` | optional `--chrome-profile NAME or PATH`, `--browser chrome or chromium` | — | Check whether a selected Chrome/Chromium profile has a valid Euria session. |
+| `auth login` | optional `--browser NAME` and `--profile NAME or PATH` | — | Reuse a session or open Infomaniak sign-in in the system browser and wait for Euria to accept it. |
+| `auth status` | optional `--browser NAME` and `--profile NAME or PATH` | — | Check whether a browser session is accepted by Euria. |
 | `--chat` | `MSG` | — | Send one prompt. Use stdin when omitted. |
 | `--guest` | — | off | Use the anonymous public endpoint without browser credentials. |
 | `--model` | `fast`, `expert`, `apertus` | `fast` | Select an Euria model. |
 | `--web-search` | `auto`, `on`, `off` | `auto` | Select automatic, forced, or disabled web search. |
 | `--history` | `FILE` | — | Load prior messages in guest mode only. |
 | `--output` | `text`, `json` | `text` | Print the answer or a JSON object. |
-| `--chrome-profile` | `NAME` or path | automatic | Select a Chrome/Chromium profile; use a full path if names collide. |
-| `--browser` | `chrome` or `chromium` | automatic | Select the browser for a custom profile path that cannot be identified from its location. |
+| `--browser` | Sweetcookie browser name; repeatable | automatic | Select browser sources to check. Supported names: `chrome`, `chromium`, `edge`, `brave`, `vivaldi`, `opera`, `arc`, `helium`, `dia`, `comet`, `atlas`, `whale`, `firefox`, `zen`, `floorp`, `waterfox`, `librewolf`, `safari`. |
+| `--profile` | `NAME` or path | automatic | Select a profile for exactly one selected browser. |
+| `--chrome-profile` | `NAME` or path | automatic | Compatibility alias for `--profile`. |
 | `--account` | `ID` | automatic | Select an account when the session has several. |
 | `--conversation` | `ID` | new conversation | Continue a saved authenticated conversation. |
 | `--list-models` | — | — | Print model names currently supported by this CLI. |
@@ -177,7 +201,7 @@ euria --guest --chat "How does chlorophyll help?" --history history.json
 ## Privacy and service behavior
 
 - Prompts and authenticated conversation contents are sent to Infomaniak. Authenticated conversations are saved in the signed-in Euria account; this CLI does not delete them.
-- Browser cookie values and the XSRF token stay in process memory and are sent only to the Euria HTTPS origin. The CLI does not write them to a config file, history file, logs, or JSON output.
+- Browser cookie values and the XSRF token stay in process memory and are sent only to the Euria HTTPS origin. Chromium and Firefox databases are read from temporary snapshots; session data is not saved by the CLI.
 - Guest mode sends no browser cookies or XSRF token. Euria currently reports a guest limit of five messages per day, but the service controls the actual quota and may change it.
 - Chat POST requests are never retried automatically. A connection can fail after Euria has accepted a prompt, and a retry could create a duplicate conversation.
 - The account and guest routes are private web-client endpoints observed during reverse engineering, not a documented public API contract. Euria can change them at any time.
