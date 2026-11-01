@@ -39,8 +39,8 @@ func testSession() session.Session {
 
 func TestAuthStatusUsesSessionCookies(t *testing.T) {
 	client, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/1/login" {
-			t.Errorf("request = %s %s, want GET /api/1/login", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || r.URL.Path != "/api/1/users/me" {
+			t.Errorf("request = %s %s, want GET /api/1/users/me", r.Method, r.URL.Path)
 		}
 		cookie, err := r.Cookie("EURIA_SESSION")
 		if err != nil || cookie.Value != "session-cookie-secret" {
@@ -63,7 +63,7 @@ func TestAuthStatusUsesSessionCookies(t *testing.T) {
 
 func TestAuthStatusFollowsSameOriginRedirect(t *testing.T) {
 	client, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/1/login" {
+		if r.URL.Path == "/api/1/users/me" {
 			http.Redirect(w, r, "/signed-in", http.StatusFound)
 			return
 		}

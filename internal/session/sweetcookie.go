@@ -46,6 +46,7 @@ func (s *SweetcookieCookieSource) Discover(ctx context.Context, requested Discov
 		if err := ctx.Err(); err != nil {
 			return DiscoveryResult{}, err
 		}
+		configureChromiumSafeStorage(browser)
 		profile := requested.Profiles[browser]
 		if profile == "" {
 			profile = defaultProfile(browser)

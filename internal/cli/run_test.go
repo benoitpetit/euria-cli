@@ -146,8 +146,8 @@ func TestAuthLoginOpensSystemURLAndDetectsSession(t *testing.T) {
 	apiCalls := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls++
-		if r.Method != http.MethodGet || r.URL.Path != "/api/1/login" {
-			t.Errorf("auth check = %s %s, want GET /api/1/login", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || r.URL.Path != "/api/1/users/me" {
+			t.Errorf("auth check = %s %s, want GET /api/1/users/me", r.Method, r.URL.Path)
 		}
 		if _, err := r.Cookie("EURIA_SESSION"); err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -238,7 +238,7 @@ func TestRunDefaultsToAuthenticatedMode(t *testing.T) {
 	guestCalls := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/1/login":
+		case "/api/1/users/me":
 			w.WriteHeader(http.StatusOK)
 		case "/api/1/users/me/accounts":
 			_, _ = io.WriteString(w, `[{"id":42}]`)
@@ -297,7 +297,7 @@ func TestRunWithoutArgumentsAndPipedPromptStartsChat(t *testing.T) {
 	chatRequests := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/1/login":
+		case "/api/1/users/me":
 			w.WriteHeader(http.StatusOK)
 		case "/api/1/users/me/accounts":
 			_, _ = io.WriteString(w, `[{"id":42}]`)
@@ -337,8 +337,8 @@ func TestRunAuthLoginReusesSignedInProfileWithoutLaunching(t *testing.T) {
 	apiCalls := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls++
-		if r.Method != http.MethodGet || r.URL.Path != "/api/1/login" {
-			t.Errorf("login request = %s %s, want GET /api/1/login", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || r.URL.Path != "/api/1/users/me" {
+			t.Errorf("login request = %s %s, want GET /api/1/users/me", r.Method, r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -377,8 +377,8 @@ func TestRunAuthLoginTimesOutWaitingForSession(t *testing.T) {
 	apiCalls := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls++
-		if r.Method != http.MethodGet || r.URL.Path != "/api/1/login" {
-			t.Errorf("login request = %s %s, want GET /api/1/login", r.Method, r.URL.Path)
+		if r.Method != http.MethodGet || r.URL.Path != "/api/1/users/me" {
+			t.Errorf("login request = %s %s, want GET /api/1/users/me", r.Method, r.URL.Path)
 		}
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -447,7 +447,7 @@ func TestRunRejectsMultipleSignedInProfiles(t *testing.T) {
 	source.cookies[second.Path] = []*http.Cookie{{Name: "session", Value: "other", Path: "/"}}
 	loginCalls := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/1/login" {
+		if r.URL.Path == "/api/1/users/me" {
 			loginCalls++
 			w.WriteHeader(http.StatusOK)
 			return
@@ -480,7 +480,7 @@ func TestRunIgnoresLoggedOutCookieProfiles(t *testing.T) {
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/1/login":
+		case "/api/1/users/me":
 			if cookie, _ := r.Cookie("EURIA_SESSION"); cookie == nil {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -532,8 +532,8 @@ func TestRunGuestSkipsCookieSource(t *testing.T) {
 func TestRunAuthStatusDoesNotPrintAccountData(t *testing.T) {
 	source := workflowSessionSource()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/1/login" {
-			t.Errorf("auth status request path = %q, want /api/1/login", r.URL.Path)
+		if r.URL.Path != "/api/1/users/me" {
+			t.Errorf("auth status request path = %q, want /api/1/users/me", r.URL.Path)
 		}
 		_, _ = io.WriteString(w, `{"email":"private@example.com","account_id":42}`)
 	}))

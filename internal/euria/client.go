@@ -113,7 +113,7 @@ func NewClient(origin string, httpClient *http.Client) (*Client, error) {
 
 // AuthStatus checks whether Euria accepts the browser session.
 func (c *Client) AuthStatus(ctx context.Context, userSession session.Session) (bool, error) {
-	response, err := c.send(ctx, http.MethodGet, "/api/1/login", nil, &userSession)
+	response, err := c.send(ctx, http.MethodGet, "/api/1/users/me", nil, &userSession)
 	if err != nil {
 		return false, err
 	}

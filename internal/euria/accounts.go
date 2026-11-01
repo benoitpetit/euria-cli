@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/benoitpetit/euria_retro/internal/session"
 )
@@ -35,11 +36,23 @@ func (c *Client) Accounts(ctx context.Context, userSession session.Session) ([]A
 	if !isSuccess(response.StatusCode) {
 		return nil, responseError(response, false)
 	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read Euria accounts response: %w", err)
+	}
 	var rawAccounts []struct {
 		ID json.RawMessage `json:"id"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&rawAccounts); err != nil {
-		return nil, fmt.Errorf("decode Euria accounts response: %w", err)
+	if err := json.Unmarshal(body, &rawAccounts); err != nil {
+		var wrapped struct {
+			Data []struct {
+				ID json.RawMessage `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &wrapped); err != nil {
+			return nil, fmt.Errorf("decode Euria accounts response: %w", err)
+		}
+		rawAccounts = wrapped.Data
 	}
 	accounts := make([]Account, 0, len(rawAccounts))
 	for _, raw := range rawAccounts {
@@ -68,7 +81,11 @@ func SelectAccount(accounts []Account, requestedID string) (Account, error) {
 	case 1:
 		return accounts[0], nil
 	default:
-		return Account{}, errors.New("multiple Euria accounts are available; select one with --account ID")
+		ids := make([]string, 0, len(accounts))
+		for _, account := range accounts {
+			ids = append(ids, account.ID)
+		}
+		return Account{}, fmt.Errorf("multiple Euria accounts are available (%s); select one with --account ID", strings.Join(ids, ", "))
 	}
 }
 
