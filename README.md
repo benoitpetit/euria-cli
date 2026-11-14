@@ -51,7 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.
 Install a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.sh | sh -s -- --version v0.0.4
+curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.sh | sh -s -- --version v0.0.5
 ```
 
 Windows (PowerShell):
@@ -69,7 +69,7 @@ Install to a custom directory:
 Install a specific version:
 
 ```powershell
-.\install.ps1 -Version v0.0.4
+.\install.ps1 -Version v0.0.5
 ```
 The installer detects your OS and architecture, downloads the matching release asset, verifies its SHA-256 checksum, and installs `euria` into `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\euria\bin` (Windows).
 
