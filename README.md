@@ -34,6 +34,45 @@ euria auth status --cdp http://localhost:9222
 euria --chat "Hello" --cdp http://localhost:9222
 ```
 
+## Quick install
+
+Linux / macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.sh | sh
+```
+
+Install to a custom directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.sh | sh -s -- --dir /usr/local/bin
+```
+
+Install a specific version:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.sh | sh -s -- --version v0.0.4
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.ps1 | iex
+```
+
+Install to a custom directory:
+
+```powershell
+.\install.ps1 -Dir "$env:LOCALAPPDATA\euria\bin"
+```
+
+Install a specific version:
+
+```powershell
+.\install.ps1 -Version v0.0.4
+```
+The installer detects your OS and architecture, downloads the matching release asset, verifies its SHA-256 checksum, and installs `euria` into `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\euria\bin` (Windows).
+
 ## Install
 
 Download the asset for your OS and architecture from [GitHub Releases](https://github.com/benoitpetit/euria_retro/releases). Release asset names:
