@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/euria-retro-cover.png" width="1000" alt="Euria Retro: a terminal prompt flows through the redesigned blue gradient Euria logo into a chat response">
+  <img src="assets/euria-retro-cover.png" width="1000" alt="Euria Retro: a friendly terminal prompt connects to a chat response">
 </p>
 
 <h1 align="center">Euria Retro</h1>
