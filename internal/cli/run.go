@@ -86,7 +86,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "completion":
 		return runCompletion(opts, stdout)
 	case "version":
-		_, err := io.WriteString(stdout, "euria 0.0.5\n")
+		_, err := io.WriteString(stdout, "euria 0.0.6\n")
 		return err
 	case "update":
 		return runUpdate(ctx, stdout, stderr, opts)
