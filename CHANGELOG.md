@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add `--thinking`, `--project`, `--tool`, `--ephemeral`, `--stream` flags.
+- Add `--audio` and `--voice` (microphone recording + transcription).
+- Add `--cdp` cookie source via Chrome DevTools Protocol.
+- Add conversation management commands (`conversations`, `conversation`).
+- Add shell completion (`completion bash|zsh|fish`).
+- Normalize HTTP/network errors and reduce noisy warnings.
+- Update documentation (README, docs/cli.md, docs/action-plan.md).
 - Replace the Bash and PowerShell scripts with a Linux-first Go CLI.
 - Reuse a signed-in Chrome/Chromium Euria session and keep guest chat explicit.
 - Add account selection, conversation continuation, streaming responses, and JSON output.

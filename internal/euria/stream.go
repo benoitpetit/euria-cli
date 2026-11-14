@@ -17,6 +17,12 @@ type ChatResult struct {
 
 // ReadStream joins Euria's server-sent events into one completed answer.
 func ReadStream(stream io.Reader) (ChatResult, error) {
+	return ReadStreamWithCallback(stream, nil)
+}
+
+// ReadStreamWithCallback is like ReadStream but invokes onDelta for each content
+// chunk as it arrives (when non-nil).
+func ReadStreamWithCallback(stream io.Reader, onDelta func(string)) (ChatResult, error) {
 	if stream == nil {
 		return ChatResult{}, errors.New("Euria returned an empty stream")
 	}
@@ -77,6 +83,9 @@ func ReadStream(stream io.Reader) (ChatResult, error) {
 						return errors.New("malformed Euria stream event")
 					}
 					result.Answer += content
+					if onDelta != nil {
+						onDelta(content)
+					}
 				}
 			}
 		}

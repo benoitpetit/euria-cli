@@ -26,6 +26,14 @@ Cookie support is provided by [Sweetcookie](https://github.com/steipete/sweetcoo
 
 `auth login` opens the system's default browser. Linux uses `xdg-open`; macOS uses `open`; Windows uses the system URL handler. The system browser may differ from the selected cookie source. When you pass `--browser` or `--profile`, finish signing in in that browser and profile; if the URL opened elsewhere, open `https://euria.infomaniak.com` in the selected browser.
 
+Alternatively, you can read cookies from a browser exposing a Chrome DevTools Protocol endpoint (started with `--remote-debugging-port=9222`):
+
+```sh
+chromium --remote-debugging-port=9222 --user-data-dir=/tmp/euria-profile
+euria auth status --cdp http://localhost:9222
+euria --chat "Hello" --cdp http://localhost:9222
+```
+
 ## Install
 
 Download the asset for your OS and architecture from [GitHub Releases](https://github.com/benoitpetit/euria_retro/releases). Release asset names:
@@ -150,6 +158,64 @@ To send a prompt from a file or another command, omit `--chat` and pipe the prom
 cat prompt.txt | euria --output json
 ```
 
+## Conversations and projects (authenticated)
+
+List, search, and manage saved conversations:
+
+```sh
+euria conversations
+euria conversations search "DNS"
+euria conversations --archived
+euria conversations --favorites
+euria conversation show CONVERSATION_ID
+euria conversation rename CONVERSATION_ID "New title"
+euria conversation archive CONVERSATION_ID
+euria conversation unarchive CONVERSATION_ID
+euria conversation favorite CONVERSATION_ID
+euria conversation unfavorite CONVERSATION_ID
+euria conversation share CONVERSATION_ID
+```
+
+Ephemeral chat (no saved conversation):
+
+```sh
+euria --chat "Quick question" --ephemeral
+```
+
+Streaming output:
+
+```sh
+euria --chat "Write a long answer." --stream
+```
+
+Thinking mode and tools:
+
+```sh
+euria --chat "Solve this." --thinking --tool wiki_search --tool create_pdf
+```
+
+## Audio and voice
+
+Transcribe an audio file and use it as the prompt (guest or authenticated):
+
+```sh
+euria --guest --audio recording.webm --language en
+euria --audio recording.webm --account 12345
+```
+
+Record directly from the microphone (requires `sox`/`rec`, `arecord`, or `ffmpeg`):
+
+```sh
+euria --guest --voice
+euria --voice --chat "Summarize this:"
+```
+
+Euria accepts `video/mp4`, `video/webm`, `audio/webm`, `audio/mp4` files. Convert with, for example:
+
+```sh
+ffmpeg -i input.wav -c:a libopus output.webm
+```
+
 ## Guest chat
 
 Use `--guest` to send the request to Euria's public ephemeral endpoint. Guest mode never inspects or sends browser cookies:
@@ -191,9 +257,21 @@ euria --guest --chat "How does chlorophyll help?" --history history.json
 | `--browser` | Sweetcookie browser name; repeatable | automatic | Select browser sources to check. Supported names: `chrome`, `chromium`, `edge`, `brave`, `vivaldi`, `opera`, `arc`, `helium`, `dia`, `comet`, `atlas`, `whale`, `firefox`, `zen`, `floorp`, `waterfox`, `librewolf`, `safari`. |
 | `--profile` | `NAME` or path | browser default | Select a profile for exactly one selected browser. |
 | `--chrome-profile` | `NAME` or path | browser default | Compatibility alias for `--profile`. |
+| `--archived` | — | off | List archived conversations. |
+| `--favorites` | — | off | List favorite conversations. |
+| `--login-timeout` | `DUR` | `5m` | Maximum time to wait for browser sign-in. |
+| `--cdp` | `URL` | — | Read cookies from a Chrome DevTools Protocol endpoint (e.g. `http://localhost:9222`). |
 | `--account` | `ID` | automatic | Select an account when the session has several. |
 | `--conversation` | `ID` | new conversation | Continue a saved authenticated conversation. |
 | `--list-models` | — | — | Print model names currently supported by this CLI. |
+| `--thinking` | — | off | Enable Euria thinking mode. |
+| `--project` | `ID` | — | Associate a new authenticated conversation with a project. |
+| `--tool` | `NAME` | — | Add an Euria tool (repeatable): `web_search`, `web_search_forced`, `faq_search`, `wiki_search`, `create_pdf`. |
+| `--ephemeral` | — | off | Use ephemeral chat without saving a conversation (authenticated mode). |
+| `--stream` | — | off | Stream answer deltas as they arrive (text output). |
+| `--audio` | `FILE` | — | Transcribe an audio file and use it as the prompt. |
+| `--voice` | — | off | Record from the microphone and transcribe (requires sox/arecord/ffmpeg). |
+| `--language` | `CODE` | from `LANG` or `en` | Language for audio transcription. |
 | `-h`, `--help` | — | — | Show usage. |
 
 `--history` requires `--guest`. `--account` and `--conversation` use authenticated mode. With no arguments and empty stdin, the CLI prints help.

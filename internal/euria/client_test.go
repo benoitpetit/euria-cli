@@ -92,7 +92,7 @@ func TestAuthenticatedPostSendsXsrfHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	response, err := client.CreateConversation(context.Background(), testSession(), "42", ChatRequest{
+	response, err := client.CreateConversation(context.Background(), testSession(), "42", "", ChatRequest{
 		Message: "hello",
 		Model:   "fast",
 	})
@@ -167,7 +167,7 @@ func TestCreateAndContinueConversationUseObservedPayloads(t *testing.T) {
 	ctx := context.Background()
 	userSession := testSession()
 
-	created, err := client.CreateConversation(ctx, userSession, "42", ChatRequest{
+	created, err := client.CreateConversation(ctx, userSession, "42", "", ChatRequest{
 		Message:  "first prompt",
 		Model:    "expert",
 		Tools:    []string{"web_search"},
@@ -249,7 +249,7 @@ func TestAuthenticatedPostIsNotReplayedBySameOriginRedirect(t *testing.T) {
 		}
 		http.Redirect(w, r, r.URL.Path+"?next=session-cookie-secret", http.StatusTemporaryRedirect)
 	}))
-	_, err := client.CreateConversation(context.Background(), testSession(), "42", ChatRequest{Message: "hello", Model: "fast"})
+	_, err := client.CreateConversation(context.Background(), testSession(), "42", "", ChatRequest{Message: "hello", Model: "fast"})
 	if err == nil {
 		t.Fatal("CreateConversation() followed a same-origin redirect")
 	}
@@ -279,7 +279,7 @@ func TestTransportErrorDoesNotExposeRequestURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.CreateConversation(context.Background(), testSession(), "private-account-id", ChatRequest{Message: "hello", Model: "fast"})
+	_, err = client.CreateConversation(context.Background(), testSession(), "private-account-id", "", ChatRequest{Message: "hello", Model: "fast"})
 	if err == nil || !strings.Contains(err.Error(), "request failed") {
 		t.Fatalf("CreateConversation() error = %v, want a generic request failure", err)
 	}
@@ -312,7 +312,7 @@ func TestSessionCookieAndXsrfUpdatesPersistBetweenRequests(t *testing.T) {
 	if _, err := client.Accounts(context.Background(), userSession); err != nil {
 		t.Fatalf("Accounts() error = %v", err)
 	}
-	response, err := client.CreateConversation(context.Background(), userSession, "42", ChatRequest{Message: "hello", Model: "fast"})
+	response, err := client.CreateConversation(context.Background(), userSession, "42", "", ChatRequest{Message: "hello", Model: "fast"})
 	if err != nil {
 		t.Fatalf("CreateConversation() error = %v", err)
 	}
@@ -338,7 +338,7 @@ func TestChatPostIsNotRetried(t *testing.T) {
 		}
 		connection.Close()
 	}))
-	_, _ = client.CreateConversation(context.Background(), testSession(), "42", ChatRequest{Message: "hello", Model: "fast"})
+	_, _ = client.CreateConversation(context.Background(), testSession(), "42", "", ChatRequest{Message: "hello", Model: "fast"})
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("POST attempts = %d, want exactly 1", got)
 	}

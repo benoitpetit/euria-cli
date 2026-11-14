@@ -51,6 +51,38 @@ func TestParseAcceptsRepeatedBrowsersInOrder(t *testing.T) {
 	}
 }
 
+func TestParsePhase0Flags(t *testing.T) {
+	got, err := Parse([]string{
+		"--chat", "hello",
+		"--thinking",
+		"--project", "proj-1",
+		"--tool", "wiki_search",
+		"--tool", "create_pdf",
+		"--login-timeout", "2m",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !got.Thinking {
+		t.Fatal("Thinking not set")
+	}
+	if got.ProjectID != "proj-1" {
+		t.Fatalf("ProjectID = %q", got.ProjectID)
+	}
+	if !reflect.DeepEqual(got.Tools, []string{"wiki_search", "create_pdf"}) {
+		t.Fatalf("Tools = %v", got.Tools)
+	}
+	if got.LoginTimeout.String() != "2m0s" {
+		t.Fatalf("LoginTimeout = %v", got.LoginTimeout)
+	}
+}
+
+func TestParseRejectsUnsupportedTool(t *testing.T) {
+	if _, err := Parse([]string{"--chat", "hello", "--tool", "nope"}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestParseRejectsUnsupportedBrowser(t *testing.T) {
 	for _, name := range []string{"unknown", "inline"} {
 		if _, err := parseBrowsers([]string{name}); err == nil {

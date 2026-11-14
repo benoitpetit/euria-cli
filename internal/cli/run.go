@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -40,6 +42,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	opts, err := Parse(args)
 	if err != nil {
 		return err
+	}
+	if opts.LoginTimeout > 0 {
+		dependencies.LoginTimeout = opts.LoginTimeout
 	}
 	if stdout == nil {
 		stdout = io.Discard
@@ -74,6 +79,15 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runAuthStatus(ctx, opts, stdout, stderr, dependencies)
 	case "auth-login":
 		return runAuthLogin(ctx, opts, stdout, stderr, dependencies)
+	case "conversations":
+		return runConversations(ctx, opts, stdout, stderr, dependencies)
+	case "conversation":
+		return runConversation(ctx, opts, stdout, stderr, dependencies)
+	case "completion":
+		return runCompletion(opts, stdout)
+	case "version":
+		_, err := io.WriteString(stdout, "euria 0.2.0\n")
+		return err
 	default:
 		return runChat(ctx, opts, stdin, stdout, stderr, dependencies)
 	}
@@ -239,6 +253,79 @@ func runAuthStatus(ctx context.Context, opts Options, stdout, stderr io.Writer, 
 }
 
 func runChat(ctx context.Context, opts Options, stdin io.Reader, stdout, stderr io.Writer, dependencies Dependencies) error {
+	if opts.AudioPath == "" && opts.Voice {
+		path, err := recordAudio(ctx, stderr)
+		if err != nil {
+			return err
+		}
+		opts.AudioPath = path
+		defer os.Remove(path)
+	}
+	if opts.AudioPath != "" && opts.Guest {
+		client, err := newEuriaClient(dependencies)
+		if err != nil {
+			return err
+		}
+		language := resolveLanguage(opts.Language)
+		text, err := client.TranscribeAudioGuest(ctx, language, opts.AudioPath)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(text) == "" {
+			return errors.New("transcription returned an empty result")
+		}
+		if opts.Prompt == "" {
+			opts.Prompt = text
+		} else {
+			opts.Prompt = opts.Prompt + "\n" + text
+		}
+	}
+	if opts.AudioPath != "" && !opts.Guest {
+		client, err := newEuriaClient(dependencies)
+		if err != nil {
+			return err
+		}
+		// discover session first
+		discovery, err := discoverSessions(ctx, opts, dependencies)
+		if err != nil {
+			return err
+		}
+		if len(discovery.Sessions) == 0 {
+			return noSignedInSessionError()
+		}
+		sessions, err := signedInSessions(ctx, client, discovery.Sessions)
+		if err != nil {
+			return err
+		}
+		if len(sessions) == 0 {
+			return noSignedInSessionError()
+		}
+		userSession, err := selectSession(sessions)
+		if err != nil {
+			return err
+		}
+		accounts, err := client.Accounts(ctx, userSession)
+		if err != nil {
+			return redactSessionError(err, userSession)
+		}
+		account, err := euria.SelectAccount(accounts, opts.AccountID)
+		if err != nil {
+			return err
+		}
+		language := resolveLanguage(opts.Language)
+		text, err := client.TranscribeAudio(ctx, userSession, account.ID, language, opts.AudioPath)
+		if err != nil {
+			return redactSessionError(err, userSession)
+		}
+		if strings.TrimSpace(text) == "" {
+			return errors.New("transcription returned an empty result")
+		}
+		if opts.Prompt == "" {
+			opts.Prompt = text
+		} else {
+			opts.Prompt = opts.Prompt + "\n" + text
+		}
+	}
 	prompt, err := ReadPrompt(opts, stdin)
 	if err != nil {
 		return err
@@ -283,30 +370,58 @@ func runChat(ctx context.Context, opts Options, stdin io.Reader, stdout, stderr 
 	if err != nil {
 		return err
 	}
-	request := euria.ChatRequest{Message: prompt, Model: opts.Model, Tools: toolsForSearch(opts.WebSearch)}
+	var thinking *bool
+	if opts.Thinking {
+		value := true
+		thinking = &value
+	}
+	tools := append([]string{}, toolsForSearch(opts.WebSearch)...)
+	tools = append(tools, opts.Tools...)
+	tools = uniqueStrings(tools)
 	var stream io.ReadCloser
-	if opts.ConversationID == "" {
-		stream, err = client.CreateConversation(ctx, userSession, account.ID, request)
+	if opts.Ephemeral {
+		tools := append([]string{}, toolsForSearch(opts.WebSearch)...)
+		tools = append(tools, opts.Tools...)
+		tools = uniqueStrings(tools)
+		stream, err = client.EphemeralConversation(ctx, userSession, account.ID, euria.GuestRequest{
+			Messages: []euria.HistoryMessage{{Role: "user", Content: prompt}},
+			Model:    opts.Model,
+			Tools:    tools,
+			Thinking: thinking,
+		})
 	} else {
-		messages, messageErr := client.ConversationMessages(ctx, userSession, account.ID, opts.ConversationID)
-		if messageErr != nil {
-			return messageErr
+		request := euria.ChatRequest{Message: prompt, Model: opts.Model, Tools: tools, Thinking: thinking}
+		if opts.ConversationID == "" {
+			stream, err = client.CreateConversation(ctx, userSession, account.ID, opts.ProjectID, request)
+		} else {
+			messages, messageErr := client.ConversationMessages(ctx, userSession, account.ID, opts.ConversationID)
+			if messageErr != nil {
+				return messageErr
+			}
+			if len(messages) == 0 || messages[len(messages)-1].ID == "" {
+				return errors.New("the selected Euria conversation has no message to continue")
+			}
+			stream, err = client.ContinueConversation(ctx, userSession, account.ID, opts.ConversationID, messages[len(messages)-1].ID, request)
 		}
-		if len(messages) == 0 || messages[len(messages)-1].ID == "" {
-			return errors.New("the selected Euria conversation has no message to continue")
-		}
-		stream, err = client.ContinueConversation(ctx, userSession, account.ID, opts.ConversationID, messages[len(messages)-1].ID, request)
 	}
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
-	result, err := euria.ReadStream(stream)
+	var onDelta func(string)
+	if opts.Stream && opts.Output == "text" {
+		onDelta = func(chunk string) { _, _ = fmt.Fprint(stdout, chunk) }
+	}
+	result, err := euria.ReadStreamWithCallback(stream, onDelta)
 	if err != nil {
 		return redactSessionError(err, userSession)
 	}
 	if result.ConversationID == "" {
 		result.ConversationID = opts.ConversationID
+	}
+	if opts.Stream && opts.Output == "text" {
+		_, err = fmt.Fprintln(stdout)
+		return err
 	}
 	return writeChatResult(stdout, opts.Output, result)
 }
@@ -317,17 +432,34 @@ func runGuestChat(ctx context.Context, client *euria.Client, opts Options, promp
 		return err
 	}
 	messages = append(messages, euria.HistoryMessage{Role: "user", Content: prompt})
+	var thinking *bool
+	if opts.Thinking {
+		value := true
+		thinking = &value
+	}
+	tools := append([]string{}, toolsForSearch(opts.WebSearch)...)
+	tools = append(tools, opts.Tools...)
+	tools = uniqueStrings(tools)
 	stream, err := client.GuestConversation(ctx, euria.GuestRequest{
 		Messages: messages,
 		Model:    opts.Model,
-		Tools:    toolsForSearch(opts.WebSearch),
+		Tools:    tools,
+		Thinking: thinking,
 	})
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
-	result, err := euria.ReadStream(stream)
+	var onDelta func(string)
+	if opts.Stream && opts.Output == "text" {
+		onDelta = func(chunk string) { _, _ = fmt.Fprint(stdout, chunk) }
+	}
+	result, err := euria.ReadStreamWithCallback(stream, onDelta)
 	if err != nil {
+		return err
+	}
+	if opts.Stream && opts.Output == "text" {
+		_, err = fmt.Fprintln(stdout)
 		return err
 	}
 	return writeChatResult(stdout, opts.Output, result)
@@ -360,7 +492,11 @@ func discoverSessions(ctx context.Context, opts Options, dependencies Dependenci
 	}
 	source := dependencies.CookieSource
 	if source == nil {
-		source = session.NewSweetcookieCookieSource()
+		if opts.CDPEndpoint != "" {
+			source = session.NewCDPCookieSource(opts.CDPEndpoint)
+		} else {
+			source = session.NewSweetcookieCookieSource()
+		}
 	}
 	return source.Discover(ctx, options)
 }
@@ -381,6 +517,26 @@ func reportDiscoveryWarnings(writer io.Writer, opts Options, warnings []string, 
 	return nil
 }
 
+// noisyDiagnostic reports whether a discovery warning is an expected,
+// non-actionable diagnostic on the current platform (e.g. a browser that is
+// not installed, or a keyring that is unavailable).
+func noisyDiagnostic(lower string) bool {
+	noisy := []string{
+		"store not found",
+		"profile not found",
+		"failed to read linux keyring",
+		"via secret-tool",
+		"v11 cookies may be unavailable",
+		"supported on macos only",
+	}
+	for _, needle := range noisy {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func warningsForReport(opts Options, warnings []string, usableSession bool) []string {
 	if len(opts.Browsers) > 0 {
 		return warnings
@@ -390,8 +546,7 @@ func warningsForReport(opts Options, warnings []string, usableSession bool) []st
 	}
 	var actionable []string
 	for _, warning := range warnings {
-		lower := strings.ToLower(warning)
-		if strings.Contains(lower, "store not found") || strings.Contains(lower, "profile not found") {
+		if noisyDiagnostic(strings.ToLower(warning)) {
 			continue
 		}
 		actionable = append(actionable, warning)
@@ -445,6 +600,295 @@ func newEuriaClient(dependencies Dependencies) (*euria.Client, error) {
 		origin = defaultEuriaOrigin
 	}
 	return euria.NewClient(origin, dependencies.HTTPClient)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func runConversations(ctx context.Context, opts Options, stdout, stderr io.Writer, dependencies Dependencies) error {
+	client, err := newEuriaClient(dependencies)
+	if err != nil {
+		return err
+	}
+	userSession, account, err := discoverAccount(ctx, opts, stderr, dependencies, client)
+	if err != nil {
+		return err
+	}
+	if opts.Subcommand == "search" {
+		query := strings.Join(opts.Positional, " ")
+		convs, err := client.SearchConversations(ctx, userSession, account.ID, query)
+		if err != nil {
+			return redactSessionError(err, userSession)
+		}
+		return writeConversations(stdout, opts.Output, convs)
+	}
+	var convs []euria.Conversation
+	if opts.Archived {
+		convs, err = client.ArchivedConversations(ctx, userSession, account.ID)
+	} else if opts.Favorites {
+		convs, err = client.FavoriteConversations(ctx, userSession, account.ID)
+	} else {
+		convs, err = client.Conversations(ctx, userSession, account.ID)
+	}
+	if err != nil {
+		return redactSessionError(err, userSession)
+	}
+	return writeConversations(stdout, opts.Output, convs)
+}
+
+func runConversation(ctx context.Context, opts Options, stdout, stderr io.Writer, dependencies Dependencies) error {
+	client, err := newEuriaClient(dependencies)
+	if err != nil {
+		return err
+	}
+	userSession, account, err := discoverAccount(ctx, opts, stderr, dependencies, client)
+	if err != nil {
+		return err
+	}
+	if len(opts.Positional) == 0 {
+		return fmt.Errorf("conversation ID is required")
+	}
+	id := opts.Positional[0]
+	switch opts.Subcommand {
+	case "show":
+		conv, err := client.GetConversation(ctx, userSession, account.ID, id)
+		if err != nil {
+			return redactSessionError(err, userSession)
+		}
+		return writeConversation(stdout, opts.Output, conv)
+	case "rename":
+		title := strings.Join(opts.Positional[1:], " ")
+		if title == "" {
+			return fmt.Errorf("a title is required")
+		}
+		if err := client.RenameConversation(ctx, userSession, account.ID, id, title); err != nil {
+			return redactSessionError(err, userSession)
+		}
+		_, err := fmt.Fprintln(stdout, "renamed")
+		return err
+	case "archive":
+		if err := client.ArchiveConversation(ctx, userSession, account.ID, id); err != nil {
+			return redactSessionError(err, userSession)
+		}
+		_, err := fmt.Fprintln(stdout, "archived")
+		return err
+	case "unarchive":
+		if err := client.UnarchiveConversation(ctx, userSession, account.ID, id); err != nil {
+			return redactSessionError(err, userSession)
+		}
+		_, err := fmt.Fprintln(stdout, "unarchived")
+		return err
+	case "favorite":
+		if err := client.FavoriteConversation(ctx, userSession, account.ID, id); err != nil {
+			return redactSessionError(err, userSession)
+		}
+		_, err := fmt.Fprintln(stdout, "favorited")
+		return err
+	case "unfavorite":
+		if err := client.UnfavoriteConversation(ctx, userSession, account.ID, id); err != nil {
+			return redactSessionError(err, userSession)
+		}
+		_, err := fmt.Fprintln(stdout, "unfavorited")
+		return err
+	case "share":
+		share, err := client.ShareConversation(ctx, userSession, account.ID, id)
+		if err != nil {
+			return redactSessionError(err, userSession)
+		}
+		if opts.Output == "json" {
+			return json.NewEncoder(stdout).Encode(share)
+		}
+		_, err = fmt.Fprintf(stdout, "https://euria.infomaniak.com/shared/%s\n", share.ID)
+		return err
+	default:
+		return fmt.Errorf("unknown conversation command %q", opts.Subcommand)
+	}
+}
+
+func discoverAccount(ctx context.Context, opts Options, stderr io.Writer, dependencies Dependencies, client *euria.Client) (session.Session, euria.Account, error) {
+	discovery, err := discoverSessions(ctx, opts, dependencies)
+	if err != nil {
+		return session.Session{}, euria.Account{}, err
+	}
+	if len(discovery.Sessions) == 0 {
+		if err := reportDiscoveryWarnings(stderr, opts, discovery.Warnings, false); err != nil {
+			return session.Session{}, euria.Account{}, err
+		}
+		return session.Session{}, euria.Account{}, noSignedInSessionError()
+	}
+	sessions, err := signedInSessions(ctx, client, discovery.Sessions)
+	if err != nil {
+		return session.Session{}, euria.Account{}, err
+	}
+	if err := reportDiscoveryWarnings(io.Discard, opts, discovery.Warnings, len(sessions) > 0); err != nil {
+		// ignore
+	}
+	if len(sessions) == 0 {
+		return session.Session{}, euria.Account{}, noSignedInSessionError()
+	}
+	userSession, err := selectSession(sessions)
+	if err != nil {
+		return session.Session{}, euria.Account{}, err
+	}
+	accounts, err := client.Accounts(ctx, userSession)
+	if err != nil {
+		return session.Session{}, euria.Account{}, redactSessionError(err, userSession)
+	}
+	account, err := euria.SelectAccount(accounts, opts.AccountID)
+	if err != nil {
+		return session.Session{}, euria.Account{}, err
+	}
+	return userSession, account, nil
+}
+
+func writeConversations(w io.Writer, output string, convs []euria.Conversation) error {
+	if output == "json" {
+		return json.NewEncoder(w).Encode(convs)
+	}
+	for _, conv := range convs {
+		title := conv.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", conv.ID, title)
+	}
+	return nil
+}
+
+func writeConversation(w io.Writer, output string, conv euria.Conversation) error {
+	if output == "json" {
+		return json.NewEncoder(w).Encode(conv)
+	}
+	title := conv.Title
+	if title == "" {
+		title = "(untitled)"
+	}
+	_, err := fmt.Fprintf(w, "%s\t%s\n", conv.ID, title)
+	return err
+}
+
+func resolveLanguage(value string) string {
+	if strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	if env := os.Getenv("LANG"); len(env) >= 2 {
+		code := strings.ToLower(env[:2])
+		if code == "fr" || code == "en" || code == "de" || code == "it" || code == "es" {
+			return code
+		}
+	}
+	return "en"
+}
+
+func recordAudio(ctx context.Context, stderr io.Writer) (string, error) {
+	tmpFile, err := os.CreateTemp("", "euria-voice-*.wav")
+	if err != nil {
+		return "", err
+	}
+	tmpFile.Close()
+	os.Remove(tmpFile.Name())
+	wavPath := tmpFile.Name()
+
+	if err := recordWav(ctx, wavPath, stderr); err != nil {
+		os.Remove(wavPath)
+		return "", err
+	}
+	if _, err := os.Stat(wavPath); err != nil {
+		return "", fmt.Errorf("recording failed: %w", err)
+	}
+
+	// Convert to a format accepted by Euria when ffmpeg is available.
+	if ffmpegPath, err := exec.LookPath("ffmpeg"); err == nil {
+		webmPath := strings.TrimSuffix(wavPath, ".wav") + ".webm"
+		cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", wavPath, "-c:a", "libopus", webmPath)
+		if err := cmd.Run(); err == nil {
+			os.Remove(wavPath)
+			return webmPath, nil
+		}
+	}
+	return wavPath, nil
+}
+
+func recordWav(ctx context.Context, path string, stderr io.Writer) error {
+	_, _ = fmt.Fprintln(stderr, "Recording... press Enter to stop.")
+
+	// Try recorders in order.
+	type candidate struct {
+		name string
+		args []string
+	}
+	var candidates []candidate
+	if _, err := exec.LookPath("rec"); err == nil {
+		candidates = append(candidates, candidate{"rec", []string{"-q", path}})
+	}
+	if _, err := exec.LookPath("arecord"); err == nil {
+		candidates = append(candidates, candidate{"arecord", []string{"-q", "-f", "cd", "-t", "wav", path}})
+	}
+	if ffmpegPath, err := exec.LookPath("ffmpeg"); err == nil {
+		args := ffmpegRecordArgs(path)
+		candidates = append(candidates, candidate{ffmpegPath, args})
+	}
+	if len(candidates) == 0 {
+		return errors.New("no audio recorder found; install sox (rec), arecord, or ffmpeg")
+	}
+
+	var lastErr error
+	for _, c := range candidates {
+		cmd := exec.CommandContext(ctx, c.name, c.args...)
+		if err := cmd.Start(); err != nil {
+			lastErr = err
+			continue
+		}
+		stop := make(chan struct{})
+		go func() {
+			buf := make([]byte, 1)
+			for {
+				n, _ := os.Stdin.Read(buf)
+				if n > 0 && buf[0] == '\n' {
+					break
+				}
+				if n == 0 {
+					break
+				}
+			}
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(os.Interrupt)
+			}
+			close(stop)
+		}()
+		_ = cmd.Wait()
+		<-stop
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("recorder %s did not produce output", c.name)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("recording failed")
+	}
+	return lastErr
+}
+
+func ffmpegRecordArgs(path string) []string {
+	switch runtime.GOOS {
+	case "darwin":
+		return []string{"-y", "-f", "avfoundation", "-i", ":0", path}
+	case "windows":
+		return []string{"-y", "-f", "dshow", "-i", "audio=Microphone", path}
+	default:
+		// Try pulse, then alsa as fallback handled by caller trying next? We only return one.
+		return []string{"-y", "-f", "pulse", "-i", "default", path}
+	}
 }
 
 func toolsForSearch(mode string) []string {

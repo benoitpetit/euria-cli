@@ -51,14 +51,16 @@ type GuestRequest struct {
 	Messages []HistoryMessage
 	Model    string
 	Tools    []string
+	Thinking *bool
 }
 
 type conversationPayload struct {
-	Content  string   `json:"content"`
-	FileIDs  []string `json:"file_ids"`
-	Tools    []string `json:"tools"`
-	Model    string   `json:"model,omitempty"`
-	Thinking *bool    `json:"thinking,omitempty"`
+	ProjectID string   `json:"project_id,omitempty"`
+	Content   string   `json:"content"`
+	FileIDs   []string `json:"file_ids"`
+	Tools     []string `json:"tools"`
+	Model     string   `json:"model,omitempty"`
+	Thinking  *bool    `json:"thinking,omitempty"`
 }
 
 type continuationPayload struct {
@@ -73,6 +75,7 @@ type guestPayload struct {
 	Messages []HistoryMessage `json:"messages"`
 	Model    string           `json:"model"`
 	Tools    []string         `json:"tools"`
+	Thinking *bool            `json:"thinking,omitempty"`
 }
 
 // NewClient creates a client for the Euria HTTPS origin. Loopback HTTPS origins
@@ -129,17 +132,18 @@ func (c *Client) AuthStatus(ctx context.Context, userSession session.Session) (b
 }
 
 // CreateConversation starts a saved Euria account conversation.
-func (c *Client) CreateConversation(ctx context.Context, userSession session.Session, accountID string, request ChatRequest) (io.ReadCloser, error) {
+func (c *Client) CreateConversation(ctx context.Context, userSession session.Session, accountID, projectID string, request ChatRequest) (io.ReadCloser, error) {
 	accountID, err := pathSegment(accountID, "account")
 	if err != nil {
 		return nil, err
 	}
 	payload := conversationPayload{
-		Content:  request.Message,
-		FileIDs:  []string{},
-		Tools:    nonNilStrings(request.Tools),
-		Model:    request.Model,
-		Thinking: request.Thinking,
+		ProjectID: projectID,
+		Content:   request.Message,
+		FileIDs:   []string{},
+		Tools:     nonNilStrings(request.Tools),
+		Model:     request.Model,
+		Thinking:  request.Thinking,
 	}
 	response, err := c.send(ctx, http.MethodPost, "/api/1/accounts/"+accountID+"/conversations", payload, &userSession)
 	if err != nil {
@@ -184,13 +188,50 @@ func (c *Client) ContinueConversation(ctx context.Context, userSession session.S
 	return response.Body, nil
 }
 
+// EphemeralConversation sends an ephemeral prompt for a signed-in account without
+// saving a conversation.
+func (c *Client) EphemeralConversation(ctx context.Context, userSession session.Session, accountID string, request GuestRequest) (io.ReadCloser, error) {
+	accountID, err := pathSegment(accountID, "account")
+	if err != nil {
+		return nil, err
+	}
+	model := request.Model
+	if model == "" {
+		model = "fast"
+	}
+	messages := request.Messages
+	if messages == nil {
+		messages = []HistoryMessage{}
+	}
+	payload := struct {
+		Messages []HistoryMessage `json:"messages"`
+		Model    string           `json:"model"`
+		Tools    []string         `json:"tools"`
+		Thinking *bool            `json:"thinking,omitempty"`
+	}{
+		Messages: messages,
+		Model:    model,
+		Tools:    nonNilStrings(request.Tools),
+		Thinking: request.Thinking,
+	}
+	response, err := c.send(ctx, http.MethodPost, "/api/1/accounts/"+accountID+"/conversations/ephemeral", payload, &userSession)
+	if err != nil {
+		return nil, err
+	}
+	if !isSuccess(response.StatusCode) {
+		defer response.Body.Close()
+		return nil, responseError(response, false)
+	}
+	return response.Body, nil
+}
+
 // GuestConversation sends an ephemeral prompt without browser credentials.
 func (c *Client) GuestConversation(ctx context.Context, request GuestRequest) (io.ReadCloser, error) {
 	model := request.Model
 	if model == "" || model == "expert" {
 		model = "fast"
 	}
-	payload := guestPayload{Messages: request.Messages, Model: model, Tools: nonNilStrings(request.Tools)}
+	payload := guestPayload{Messages: request.Messages, Model: model, Tools: nonNilStrings(request.Tools), Thinking: request.Thinking}
 	response, err := c.send(ctx, http.MethodPost, "/api/1/public/conversations/ephemeral", payload, nil)
 	if err != nil {
 		return nil, err
@@ -232,6 +273,14 @@ func (c *Client) send(ctx context.Context, method, endpoint string, payload any,
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("Euria request failed: %w", ctx.Err())
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, errors.New("Euria request timed out")
+		}
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			return nil, errors.New("Euria request failed (DNS resolution error)")
 		}
 		return nil, errors.New("Euria request failed (network or TLS error)")
 	}
@@ -311,7 +360,43 @@ func responseError(response *http.Response, guest bool) error {
 	if response.StatusCode == http.StatusTooManyRequests {
 		return errors.New("Euria rate limit reached (HTTP 429)")
 	}
+	message := serverErrorMessage(response)
+	if message != "" {
+		return fmt.Errorf("Euria returned HTTP %d: %s", response.StatusCode, message)
+	}
 	return fmt.Errorf("Euria returned HTTP %d", response.StatusCode)
+}
+
+// serverErrorMessage best-effort extracts a human-readable message from an
+// error response body without leaking cookie values.
+func serverErrorMessage(response *http.Response) string {
+	if response == nil || response.Body == nil {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 4096))
+	if err != nil {
+		return ""
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return ""
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+		for _, key := range []string{"error", "message", "detail", "description"} {
+			if value, ok := parsed[key]; ok {
+				if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+					return strings.TrimSpace(text)
+				}
+				if nested, ok := value.(map[string]any); ok {
+					if text, ok := nested["message"].(string); ok && strings.TrimSpace(text) != "" {
+						return strings.TrimSpace(text)
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func isSuccess(status int) bool {

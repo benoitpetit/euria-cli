@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/benoitpetit/euria_retro/internal/session"
 )
@@ -13,6 +14,8 @@ import (
 // Options contains the command and flags selected by the user.
 type Options struct {
 	Command        string
+	Subcommand     string
+	Positional     []string
 	Prompt         string
 	Guest          bool
 	Model          string
@@ -24,6 +27,18 @@ type Options struct {
 	Browsers       []session.Browser
 	AccountID      string
 	ConversationID string
+	Thinking       bool
+	ProjectID      string
+	Ephemeral      bool
+	Stream         bool
+	Archived       bool
+	Favorites      bool
+	CDPEndpoint    string
+	AudioPath      string
+	Language       string
+	Voice          bool
+	Tools          []string
+	LoginTimeout   time.Duration
 }
 
 // Parse validates the CLI flags and identifies the selected command.
@@ -36,24 +51,58 @@ func Parse(args []string) (Options, error) {
 	}
 	flagArgs := args
 	authCommand := ""
-	if len(args) > 0 && args[0] == "auth" {
-		if len(args) < 2 || (args[1] != "login" && args[1] != "status") {
-			return Options{}, fmt.Errorf("unknown command %q; expected 'auth login' or 'auth status'", strings.Join(args, " "))
+	if len(args) > 0 {
+		switch args[0] {
+		case "auth":
+			if len(args) < 2 || (args[1] != "login" && args[1] != "status") {
+				return Options{}, fmt.Errorf("unknown command %q; expected 'auth login' or 'auth status'", strings.Join(args, " "))
+			}
+			authCommand = args[1]
+			opts.Command = "auth-" + authCommand
+			flagArgs = args[2:]
+		case "conversations":
+			opts.Command = "conversations"
+			if len(args) > 1 && (args[1] == "list" || args[1] == "search") {
+				opts.Subcommand = args[1]
+				flagArgs = args[2:]
+			} else {
+				opts.Subcommand = "list"
+				flagArgs = args[1:]
+			}
+		case "conversation":
+			if len(args) < 2 {
+				return Options{}, fmt.Errorf("unknown command %q; expected 'conversation show|rename|archive|...'", strings.Join(args, " "))
+			}
+			opts.Command = "conversation"
+			opts.Subcommand = args[1]
+			flagArgs = args[2:]
+		case "completion":
+			if len(args) < 2 {
+				return Options{}, fmt.Errorf("unknown command %q; expected 'completion bash|zsh|fish'", strings.Join(args, " "))
+			}
+			opts.Command = "completion"
+			opts.Subcommand = args[1]
+			flagArgs = args[2:]
 		}
-		authCommand = args[1]
-		opts.Command = "auth-" + authCommand
-		flagArgs = args[2:]
 	}
 
 	fs := flag.NewFlagSet("euria", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var listModels, help bool
+	var listModels, help, version bool
 	var browserValues browserFlags
 	fs.StringVar(&opts.ChromeProfile, "chrome-profile", "", "Select a Chrome/Chromium profile by name or path")
 	fs.StringVar(&opts.Profile, "profile", "", "Select one browser profile by name or path")
 	fs.Var(&browserValues, "browser", "Select a browser source; may be repeated")
+	fs.DurationVar(&opts.LoginTimeout, "login-timeout", 0, "Maximum time to wait for browser sign-in (default 5m)")
+	fs.BoolVar(&opts.Archived, "archived", false, "List archived conversations")
+	fs.BoolVar(&opts.Favorites, "favorites", false, "List favorite conversations")
+	fs.StringVar(&opts.AudioPath, "audio", "", "Transcribe an audio file and use it as the prompt")
+	fs.StringVar(&opts.CDPEndpoint, "cdp", "", "Read cookies from a Chrome DevTools Protocol endpoint")
+	fs.StringVar(&opts.Language, "language", "", "Language for audio transcription (default from LANG or en)")
+	fs.BoolVar(&opts.Voice, "voice", false, "Record from the microphone and transcribe (requires sox/arecord/ffmpeg)")
 	fs.BoolVar(&help, "help", false, "Show this help")
 	fs.BoolVar(&help, "h", false, "Show this help")
+	fs.BoolVar(&version, "version", false, "Print version")
 	if authCommand == "" {
 		fs.StringVar(&opts.Prompt, "chat", "", "Send a user message")
 		fs.BoolVar(&opts.Guest, "guest", false, "Use the anonymous guest endpoint")
@@ -63,6 +112,11 @@ func Parse(args []string) (Options, error) {
 		fs.StringVar(&opts.Output, "output", opts.Output, "Output as text or json")
 		fs.StringVar(&opts.AccountID, "account", "", "Select an Euria account by ID")
 		fs.StringVar(&opts.ConversationID, "conversation", "", "Continue an authenticated conversation by ID")
+		fs.BoolVar(&opts.Ephemeral, "ephemeral", false, "Use ephemeral chat without saving a conversation (auth mode)")
+		fs.BoolVar(&opts.Stream, "stream", false, "Stream answer deltas as they arrive (text mode)")
+		fs.BoolVar(&opts.Thinking, "thinking", false, "Enable Euria thinking mode")
+		fs.StringVar(&opts.ProjectID, "project", "", "Associate the new conversation with a project ID")
+		fs.Var(&stringSliceFlag{target: &opts.Tools}, "tool", "Add an Euria tool (web_search, web_search_forced, faq_search, wiki_search, create_pdf); may be repeated")
 		fs.BoolVar(&listModels, "list-models", false, "List model names observed by this CLI")
 	}
 	if err := fs.Parse(flagArgs); err != nil {
@@ -77,8 +131,16 @@ func Parse(args []string) (Options, error) {
 		opts.Command = "help"
 		return opts, nil
 	}
+	if version {
+		opts.Command = "version"
+		return opts, nil
+	}
 	if len(fs.Args()) != 0 {
-		return Options{}, fmt.Errorf("unexpected positional argument %q; use --chat MSG or provide the prompt on stdin", fs.Args()[0])
+		if opts.Command == "conversations" || opts.Command == "conversation" {
+			opts.Positional = append([]string(nil), fs.Args()...)
+		} else {
+			return Options{}, fmt.Errorf("unexpected positional argument %q; use --chat MSG or provide the prompt on stdin", fs.Args()[0])
+		}
 	}
 	if opts.Profile != "" && opts.ChromeProfile != "" && opts.Profile != opts.ChromeProfile {
 		return Options{}, fmt.Errorf("--profile and --chrome-profile select different profiles; use only one")
@@ -91,7 +153,7 @@ func Parse(args []string) (Options, error) {
 	}
 	if listModels {
 		opts.Command = "list-models"
-		if opts.Prompt != "" || opts.Guest || opts.HistoryPath != "" || opts.AccountID != "" || opts.ConversationID != "" || opts.Profile != "" || opts.ChromeProfile != "" || len(opts.Browsers) != 0 {
+		if opts.Prompt != "" || opts.Guest || opts.HistoryPath != "" || opts.AccountID != "" || opts.ConversationID != "" || opts.Profile != "" || opts.ChromeProfile != "" || len(opts.Browsers) != 0 || opts.Thinking || opts.ProjectID != "" || len(opts.Tools) != 0 {
 			return Options{}, fmt.Errorf("--list-models cannot be combined with chat options")
 		}
 		return opts, nil
@@ -109,8 +171,16 @@ func Parse(args []string) (Options, error) {
 	if opts.HistoryPath != "" && !opts.Guest {
 		return Options{}, fmt.Errorf("--history is available only with --guest")
 	}
-	if opts.Guest && (opts.ChromeProfile != "" || opts.Profile != "" || len(opts.Browsers) != 0 || opts.AccountID != "" || opts.ConversationID != "") {
-		return Options{}, fmt.Errorf("--profile, --chrome-profile, --browser, --account, and --conversation require authenticated mode")
+	if opts.Ephemeral && opts.ConversationID != "" {
+		return Options{}, fmt.Errorf("--ephemeral cannot be combined with --conversation")
+	}
+	for _, tool := range opts.Tools {
+		if _, ok := supportedTools[tool]; !ok {
+			return Options{}, fmt.Errorf("unsupported --tool value %q; choose web_search, web_search_forced, faq_search, wiki_search, or create_pdf", tool)
+		}
+	}
+	if opts.Guest && (opts.ChromeProfile != "" || opts.Profile != "" || len(opts.Browsers) != 0 || opts.AccountID != "" || opts.ConversationID != "" || opts.ProjectID != "" || opts.Ephemeral) {
+		return Options{}, fmt.Errorf("--profile, --chrome-profile, --browser, --account, --conversation, --project, and --ephemeral require authenticated mode")
 	}
 	if _, err := discoveryOptions(opts); err != nil {
 		return Options{}, err
@@ -125,6 +195,29 @@ func (f *browserFlags) String() string { return strings.Join(*f, ",") }
 func (f *browserFlags) Set(value string) error {
 	*f = append(*f, value)
 	return nil
+}
+
+type stringSliceFlag struct {
+	target *[]string
+}
+
+func (f *stringSliceFlag) String() string {
+	if f.target == nil {
+		return ""
+	}
+	return strings.Join(*f.target, ",")
+}
+
+func (f *stringSliceFlag) Set(value string) error {
+	if f.target == nil {
+		return fmt.Errorf("invalid tool flag")
+	}
+	*f.target = append(*f.target, value)
+	return nil
+}
+
+var supportedTools = map[string]struct{}{
+	"web_search": {}, "web_search_forced": {}, "faq_search": {}, "wiki_search": {}, "create_pdf": {},
 }
 
 var supportedBrowsers = map[string]struct{}{
@@ -208,6 +301,8 @@ func Usage() string {
 Commands:
   auth login           Open the Infomaniak sign-in flow in your default browser
   auth status          Check for a valid Euria session in selected browser sources
+  conversations        List or search saved conversations
+  conversation CMD     Show, rename, archive, favorite, or share a conversation
   --list-models        Print the model names supported by this CLI
   chat                 Send one prompt with --chat MSG or from stdin
 
@@ -218,12 +313,23 @@ Options:
   --web-search MODE      Search: auto, on, or off (default: auto)
   --history FILE         JSON array of prior messages; guest mode only
   --output FORMAT        Output: text or json (default: text)
+  --thinking             Enable Euria thinking mode
+  --project ID           Associate a new conversation with a project ID (auth mode)
+  --tool NAME            Add an Euria tool; repeat to add several
   --browser NAME         Select a browser source; repeat to check several
   --profile NAME|PATH    Select one profile for the selected browser
   --chrome-profile NAME|PATH
                          Alias for --profile (kept for compatibility)
   --account ID           Select an Euria account when the session has multiple accounts
   --conversation ID      Continue an existing authenticated conversation
+  --ephemeral            Use ephemeral chat without saving (auth mode)
+  --stream               Stream answer deltas (text mode)
+  --archived             List archived conversations
+  --favorites            List favorite conversations
+  --audio FILE           Transcribe an audio file and use it as the prompt
+  --voice                Record from the microphone and transcribe (needs sox/arecord/ffmpeg)
+  --language CODE        Language for audio transcription (default: from LANG or en)
+  --login-timeout DUR    Maximum time to wait for browser sign-in (default 5m)
   --list-models          Print supported model names
   -h, --help             Show this help
 
