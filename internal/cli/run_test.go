@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benoitpetit/euria_retro/internal/session"
+	"github.com/benoitpetit/euria-cli/internal/session"
 )
 
 type workflowCookieSource struct {

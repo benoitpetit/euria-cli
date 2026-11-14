@@ -1,4 +1,4 @@
-module github.com/benoitpetit/euria_retro
+module github.com/benoitpetit/euria-cli
 
 go 1.25.0
 

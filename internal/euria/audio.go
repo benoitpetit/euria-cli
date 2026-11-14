@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/benoitpetit/euria_retro/internal/session"
+	"github.com/benoitpetit/euria-cli/internal/session"
 )
 
 // TranscribeAudio sends an audio file to Euria for transcription (authenticated).

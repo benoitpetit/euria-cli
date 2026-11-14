@@ -1,6 +1,6 @@
 # Euria Retro — quick installer (Windows)
 # Usage (PowerShell):
-#   irm https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.ps1 | iex
 #   .\install.ps1 -Dir "$env:LOCALAPPDATA\euria\bin"
 param(
     [string]$Dir = "$env:LOCALAPPDATA\euria\bin",
@@ -8,7 +8,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "benoitpetit/euria_retro"
+$Repo = "benoitpetit/euria-cli"
 
 $arch = if ([Environment]::Is64BitOperatingSystem) {
     if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }

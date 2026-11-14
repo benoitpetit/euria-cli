@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
 # Euria Retro — quick installer (Linux / macOS)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --dir /usr/local/bin
 set -eu
 
-REPO="benoitpetit/euria_retro"
+REPO="benoitpetit/euria-cli"
 BINDIR="${HOME}/.local/bin"
 VERSION="latest"
 

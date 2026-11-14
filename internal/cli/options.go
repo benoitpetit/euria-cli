@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/benoitpetit/euria_retro/internal/session"
+	"github.com/benoitpetit/euria-cli/internal/session"
 )
 
 // Options contains the command and flags selected by the user.

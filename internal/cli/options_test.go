@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/benoitpetit/euria_retro/internal/session"
+	"github.com/benoitpetit/euria-cli/internal/session"
 )
 
 func TestParseChatFlags(t *testing.T) {

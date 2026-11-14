@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/benoitpetit/euria_retro/internal/cli"
+	"github.com/benoitpetit/euria-cli/internal/cli"
 )
 
 func main() {

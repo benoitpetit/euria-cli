@@ -39,25 +39,25 @@ euria --chat "Hello" --cdp http://localhost:9222
 Linux / macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.sh | sh
 ```
 
 Install to a custom directory:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.sh | sh -s -- --dir /usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.sh | sh -s -- --dir /usr/local/bin
 ```
 
 Install a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.sh | sh -s -- --version v0.0.4
+curl -fsSL https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.sh | sh -s -- --version v0.0.4
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/benoitpetit/euria_retro/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/benoitpetit/euria-cli/main/install.ps1 | iex
 ```
 
 Install to a custom directory:
@@ -75,7 +75,7 @@ The installer detects your OS and architecture, downloads the matching release a
 
 ## Install
 
-Download the asset for your OS and architecture from [GitHub Releases](https://github.com/benoitpetit/euria_retro/releases). Release asset names:
+Download the asset for your OS and architecture from [GitHub Releases](https://github.com/benoitpetit/euria-cli/releases). Release asset names:
 
 | Platform | Asset |
 | --- | --- |
@@ -90,8 +90,8 @@ Download the asset for your OS and architecture from [GitHub Releases](https://g
 For example, download and run the latest Linux x86-64 build:
 
 ```sh
-curl -fL https://github.com/benoitpetit/euria_retro/releases/latest/download/euria_linux_amd64 -o euria_linux_amd64
-curl -fL https://github.com/benoitpetit/euria_retro/releases/latest/download/SHA256SUMS -o SHA256SUMS
+curl -fL https://github.com/benoitpetit/euria-cli/releases/latest/download/euria_linux_amd64 -o euria_linux_amd64
+curl -fL https://github.com/benoitpetit/euria-cli/releases/latest/download/SHA256SUMS -o SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
 chmod +x euria_linux_amd64
 ./euria_linux_amd64 --help
@@ -110,8 +110,8 @@ On macOS, verify one downloaded asset with `grep ' euria_darwin_arm64$' SHA256SU
 To build and install from source on Linux or macOS:
 
 ```sh
-git clone https://github.com/benoitpetit/euria_retro.git
-cd euria_retro
+git clone https://github.com/benoitpetit/euria-cli.git
+cd euria-cli
 make build
 make install
 ```

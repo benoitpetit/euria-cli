@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/benoitpetit/euria_retro/internal/session"
+	"github.com/benoitpetit/euria-cli/internal/session"
 )
 
 // Account identifies an Euria account used in authenticated API routes.

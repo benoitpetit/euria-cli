@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/benoitpetit/euria_retro/internal/euria"
-	"github.com/benoitpetit/euria_retro/internal/session"
+	"github.com/benoitpetit/euria-cli/internal/euria"
+	"github.com/benoitpetit/euria-cli/internal/session"
 )
 
 const defaultEuriaOrigin = "https://euria.infomaniak.com"

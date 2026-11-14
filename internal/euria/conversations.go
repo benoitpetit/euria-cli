@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/benoitpetit/euria_retro/internal/session"
+	"github.com/benoitpetit/euria-cli/internal/session"
 )
 
 // Conversation is one saved Euria conversation.
