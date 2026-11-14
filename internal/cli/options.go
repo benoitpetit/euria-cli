@@ -83,6 +83,12 @@ func Parse(args []string) (Options, error) {
 			opts.Command = "completion"
 			opts.Subcommand = args[1]
 			flagArgs = args[2:]
+		case "version":
+			opts.Command = "version"
+			flagArgs = args[1:]
+		case "update":
+			opts.Command = "update"
+			flagArgs = args[1:]
 		}
 	}
 

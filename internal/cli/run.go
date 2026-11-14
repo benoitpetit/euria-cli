@@ -88,6 +88,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "version":
 		_, err := io.WriteString(stdout, "euria 0.0.5\n")
 		return err
+	case "update":
+		return runUpdate(ctx, stdout, stderr, opts)
 	default:
 		return runChat(ctx, opts, stdin, stdout, stderr, dependencies)
 	}

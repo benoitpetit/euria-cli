@@ -11,6 +11,8 @@
 - `euria conversation show|rename|archive|unarchive|favorite|unfavorite|share ID` — manage a conversation.
 - `euria --list-models` — print supported models.
 - `euria completion bash|zsh|fish` — print a shell completion script.
+- `euria version` — print version.
+- `euria update [TAG]` — update to the latest (or specified) release.
 
 ## Global options
 

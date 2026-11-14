@@ -73,6 +73,13 @@ Install a specific version:
 ```
 The installer detects your OS and architecture, downloads the matching release asset, verifies its SHA-256 checksum, and installs `euria` into `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\euria\bin` (Windows).
 
+## Self-update
+
+```sh
+euria update
+euria update v0.0.5
+```
+
 ## Install
 
 Download the asset for your OS and architecture from [GitHub Releases](https://github.com/benoitpetit/euria-cli/releases). Release asset names:
