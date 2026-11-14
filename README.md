@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/euria-retro-cover.png" width="1000" alt="Euria Retro: a terminal prompt flowing through the Euria logo into a chat response">
+  <img src="assets/euria-retro-cover.png" width="1000" alt="Euria CLI: a terminal prompt flowing through the Euria logo into a chat response">
 </p>
 
-# Euria Retro
+# Euria CLI
 
 A Go command-line client for Euria (Infomaniak). Reuses a signed-in browser session or runs in guest mode.
 
