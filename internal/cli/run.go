@@ -86,7 +86,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "completion":
 		return runCompletion(opts, stdout)
 	case "version":
-		_, err := io.WriteString(stdout, "euria 0.2.0\n")
+		_, err := io.WriteString(stdout, "euria 0.0.4\n")
 		return err
 	default:
 		return runChat(ctx, opts, stdin, stdout, stderr, dependencies)
